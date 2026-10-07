@@ -5,6 +5,7 @@ import com.example.thuctapmoi.dto.AuthResponse;
 import com.example.thuctapmoi.dto.RefreshTokenRequest;
 import com.example.thuctapmoi.dto.UserResponse;
 import com.example.thuctapmoi.entity.User;
+import com.example.thuctapmoi.entity.UserRole;
 import com.example.thuctapmoi.repository.UserRepository;
 import com.example.thuctapmoi.security.JwtService;
 import io.jsonwebtoken.JwtException;
@@ -57,6 +58,7 @@ public class AuthService {
                 passwordEncoder.encode(request.getPassword());
 
         user.setPassword(hashedPassword);
+        user.setRole(UserRole.USER);
 
         //xuong dtb
         User saved;

@@ -1,9 +1,14 @@
 package com.example.thuctapmoi.entity;
 
 import jakarta.persistence.*;
+import lombok.Getter;
+import lombok.Setter;
 
 @Entity
 @Table(name="users")
+@Getter
+@Setter
+
 public class User {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -14,6 +19,9 @@ public class User {
 
     @Column(nullable = false,length =225)
     private  String password;
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 20)
+    private UserRole role = UserRole.USER;
 
     public User() {}
 

@@ -45,8 +45,16 @@ public class SecurityConfig {
                                 "/auth/login",
                                 "/auth/refresh"
                         ).permitAll()
-                        .requestMatchers("/error").permitAll()
-                        .anyRequest().authenticated()
+                                .requestMatchers("/error").permitAll()
+
+// Chỉ ADMIN được gọi API bắt đầu bằng /admin/
+                                .requestMatchers("/admin/**").hasRole("ADMIN")
+
+// MANAGER và ADMIN được gọi API bắt đầu bằng /manager/
+                                .requestMatchers("/manager/**").hasAnyRole("MANAGER", "ADMIN")
+
+// Các API còn lại chỉ cần đăng nhập
+                                .anyRequest().authenticated()
                 )
 
                 .exceptionHandling(errors -> errors
