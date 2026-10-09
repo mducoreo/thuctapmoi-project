@@ -1,0 +1,220 @@
+.folders-page {
+    min-height: 100vh;
+    padding: 32px 20px;
+    background: #eef3f9;
+    color: #172b4d;
+    font-family: Arial, sans-serif;
+}
+
+.folders-page,
+.folders-page * {
+    box-sizing: border-box;
+}
+
+.folders-workspace {
+    max-width: 1100px;
+    margin: 0 auto;
+    overflow: hidden;
+    background: white;
+    border: 1px solid #dce4ef;
+    border-radius: 16px;
+}
+
+.folders-header {
+    padding: 26px 20px;
+    border-bottom: 1px solid #dce4ef;
+    color: #1761db;
+    font-size: 24px;
+    font-weight: bold;
+    text-align: center;
+}
+
+/* Chia cột trái 260px, cột phải lấy phần còn lại */
+.folders-layout {
+    display: grid;
+    grid-template-columns: 260px minmax(0, 1fr);
+    min-height: 600px;
+}
+
+.folders-sidebar {
+    padding: 24px 16px;
+    background: #eaf2ff;
+    border-right: 1px solid #dce4ef;
+    overflow-wrap: anywhere;
+}
+
+.folders-sidebar h1,
+.folders-sidebar h2,
+.folders-sidebar h3 {
+    margin: 0 0 20px;
+    font-size: 20px;
+}
+
+.folders-sidebar button {
+    max-width: 100%;
+    margin-bottom: 6px;
+    padding: 8px;
+    border: none;
+    background: transparent;
+    text-align: left;
+    overflow-wrap: anywhere;
+}
+
+.folders-sidebar button:hover:not(:disabled) {
+    background: #d6e6ff;
+}
+
+.folders-content {
+    min-width: 0;
+    padding: 24px;
+}
+
+.folders-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 16px;
+}
+
+.folders-toolbar h1 {
+    margin: 0;
+    font-size: 26px;
+    overflow-wrap: anywhere;
+}
+
+.folders-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.folders-page button {
+    font: inherit;
+    color: #172b4d;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.folders-content button {
+    padding: 9px 14px;
+    border: 1px solid #c7d3e3;
+    background: white;
+}
+
+.folders-content button:hover:not(:disabled) {
+    background: #f0f5ff;
+}
+
+.folders-content button.folders-primary {
+    background: #1761db;
+    border-color: #1761db;
+    color: white;
+}
+
+.folders-content button.folders-primary:hover:not(:disabled) {
+    background: #124fb8;
+}
+
+.folders-content button.folders-danger {
+    color: #dc2626;
+    border-color: #f3b6b6;
+}
+
+.folders-page button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.folders-location {
+    margin: 20px 0 24px;
+    color: #61718a;
+    overflow-wrap: anywhere;
+}
+
+.folders-list {
+    display: grid;
+    gap: 16px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.folders-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 16px;
+    padding: 20px;
+    border: 1px solid #dce4ef;
+    border-radius: 10px;
+}
+
+.folders-info {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.folders-icon {
+    font-size: 36px;
+}
+
+.folders-info strong {
+    font-size: 18px;
+}
+
+.folders-info p {
+    margin: 8px 0 0;
+    color: #61718a;
+    font-size: 14px;
+}
+
+.folders-form {
+    margin-bottom: 24px;
+    padding: 20px;
+    background: #f8faff;
+    border: 1px solid #dce4ef;
+    border-radius: 10px;
+}
+
+.folders-form h2 {
+    margin-top: 0;
+    font-size: 20px;
+}
+
+.folders-form label {
+    display: block;
+    margin-bottom: 8px;
+}
+
+.folders-form input {
+    width: 100%;
+    margin-bottom: 16px;
+    padding: 12px;
+    border: 1px solid #c7d3e3;
+    border-radius: 6px;
+    font: inherit;
+}
+
+@media (max-width: 760px) {
+    .folders-layout {
+        grid-template-columns: 1fr;
+    }
+
+    .folders-sidebar {
+        border-right: none;
+        border-bottom: 1px solid #dce4ef;
+    }
+
+    .folders-page {
+        padding: 16px 10px;
+    }
+
+    .folders-content {
+        padding: 20px 16px;
+    }
+}

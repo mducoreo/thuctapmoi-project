@@ -11,7 +11,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
-
+import com.example.thuctapmoi.dto.MoveFolderRequest;
 import java.util.List;
 import java.util.Objects;
 
@@ -111,6 +111,44 @@ public class FolderService {
 
         folder.setName(request.getName().trim());
         folder.setParent(parent);
+
+        return toResponse(repository.save(folder));
+    }
+
+    public FolderResponse move(
+            Long id,
+            MoveFolderRequest request,
+            String username
+    ) {
+        // Tìm người đang đăng nhập và thư mục cần di chuyển.
+        User actor = currentUser(username);
+        Folder folder = findFolder(id);
+        checkPermission(folder, actor);
+
+        Folder newParent = null;
+
+        // parentId = null nghĩa là chuyển ra thư mục gốc.
+        if (request.getParentId() != null) {
+            newParent = findFolder(request.getParentId());
+            checkPermission(newParent, actor);
+
+            // Giữ quy tắc: thư mục cha và con cùng chủ sở hữu.
+            if (!Objects.equals(
+                    folder.getOwner().getId(),
+                    newParent.getOwner().getId()
+            )) {
+                throw new ResponseStatusException(
+                        HttpStatus.BAD_REQUEST,
+                        "Folder cha phải cùng chủ sở hữu"
+                );
+            }
+
+            // Không chuyển vào chính nó hoặc thư mục con/cháu của nó.
+            checkCycle(folder, newParent);
+        }
+
+        // Chỉ đổi cha, giữ nguyên tên và chủ sở hữu.
+        folder.setParent(newParent);
 
         return toResponse(repository.save(folder));
     }

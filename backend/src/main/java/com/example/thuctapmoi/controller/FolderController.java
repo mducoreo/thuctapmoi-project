@@ -7,7 +7,7 @@ import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
-
+import com.example.thuctapmoi.dto.MoveFolderRequest;
 import java.util.List;
 
 @RestController
@@ -52,6 +52,15 @@ public class FolderController {
             Authentication auth
     ) {
         return service.update(id, request, auth.getName());
+    }
+
+    @PatchMapping("/{id}/move")
+    public FolderResponse move(
+            @PathVariable Long id,
+            @Valid @RequestBody MoveFolderRequest request,
+            Authentication auth
+    ) {
+        return service.move(id, request, auth.getName());
     }
 
     @DeleteMapping("/{id}")

@@ -3,6 +3,7 @@ package com.example.thuctapmoi.entity;
 import jakarta.persistence.*;
 import lombok.Getter;
 import lombok.Setter;
+import org.hibernate.annotations.Nationalized;
 
 @Getter
 @Setter
@@ -14,7 +15,7 @@ public class Folder {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     @Setter(lombok.AccessLevel.NONE)
     private Long id;
-
+    @Nationalized
     @Column(nullable = false, length = 100)
     private String name;
 

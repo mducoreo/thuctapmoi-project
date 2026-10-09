@@ -1,8 +1,13 @@
 import { useState } from 'react';
 import { api } from './api.js';
+import FoldersPage from './FoldersPage.jsx';
 import './index.css';
 
 export default function App() {
+  const [loggedIn, setLoggedIn] = useState(
+      () => Boolean(localStorage.getItem('accessToken'))
+  );
+
   const [register, setRegister] = useState(false);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -63,7 +68,7 @@ export default function App() {
         }
 
         setPassword('');
-        setSuccess(`Đăng nhập thành công với tài khoản ${name}.`);
+        setLoggedIn(true);
       }
     } catch (err) {
       setError(
@@ -74,6 +79,22 @@ export default function App() {
     } finally {
       setBusy(false);
     }
+  }
+
+  function logout() {
+    localStorage.removeItem('accessToken');
+    localStorage.removeItem('refreshToken');
+
+    setLoggedIn(false);
+    setRegister(false);
+    setPassword('');
+    setConfirmPassword('');
+    setError('');
+    setSuccess('');
+  }
+
+  if (loggedIn) {
+    return <FoldersPage onLogout={logout} />;
   }
 
   return (
@@ -121,7 +142,9 @@ export default function App() {
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
                 placeholder="Nhập mật khẩu"
-                autoComplete={register ? 'new-password' : 'current-password'}
+                autoComplete={
+                  register ? 'new-password' : 'current-password'
+                }
                 disabled={busy}
                 required
             />
@@ -160,9 +183,9 @@ export default function App() {
           </form>
 
           <div className="switch-mode">
-          <span>
-            {register ? 'Đã có tài khoản?' : 'Chưa có tài khoản?'}
-          </span>
+                    <span>
+                        {register ? 'Đã có tài khoản?' : 'Chưa có tài khoản?'}
+                    </span>
 
             <button
                 type="button"
