@@ -2,6 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import { api } from './api.js';
 import FolderTree from './FolderTree.jsx';
 import DocumentList from './DocumentList.jsx';
+import DocumentMetadataForm, {
+    emptyMetadata,
+} from './DocumentMetadataForm.jsx';
 import './FoldersPage.css';
 
 const FOLDER_DRAG_TYPE = 'application/x-folder';
@@ -26,17 +29,33 @@ export default function FoldersPage({ onLogout }) {
     const [dropTarget, setDropTarget] = useState(null);
 
     const [file, setFile] = useState(null);
+    const [metadata, setMetadata] = useState(emptyMetadata);
     const [uploadError, setUploadError] = useState('');
     const [uploadSuccess, setUploadSuccess] = useState('');
 
+    const [preview, setPreview] = useState(null);
+
+    // Form/thông tin tài liệu đang mở.
+    const [documentAction, setDocumentAction] = useState(null);
+    const [documentName, setDocumentName] = useState('');
+    const [destinationFolders, setDestinationFolders] = useState([]);
+    const [targetFolderId, setTargetFolderId] = useState('');
+
+    const documentLock = useRef(false);
     const fileInputRef = useRef(null);
     const moveLock = useRef(false);
     const uploadLock = useRef(false);
 
     const currentFolder = path[path.length - 1];
     const parentId = currentFolder?.id ?? null;
-    const actionDisabled = busy || loading || showForm;
 
+    const actionDisabled =
+        busy ||
+        loading ||
+        showForm ||
+        Boolean(documentAction);
+
+    // Lấy danh sách thư mục.
     useEffect(() => {
         let active = true;
 
@@ -68,8 +87,10 @@ export default function FoldersPage({ onLogout }) {
         };
     }, [parentId, reload]);
 
+    // Xóa dữ liệu form upload khi đổi thư mục.
     useEffect(() => {
         setFile(null);
+        setMetadata(emptyMetadata());
         setUploadError('');
         setUploadSuccess('');
 
@@ -77,6 +98,15 @@ export default function FoldersPage({ onLogout }) {
             fileInputRef.current.value = '';
         }
     }, [parentId]);
+
+    // Thu hồi URL tạm khi đóng hoặc đổi tài liệu đang xem.
+    useEffect(() => {
+        if (!preview) return;
+
+        return () => {
+            URL.revokeObjectURL(preview.url);
+        };
+    }, [preview]);
 
     function clearMessages() {
         setError('');
@@ -174,6 +204,331 @@ export default function FoldersPage({ onLogout }) {
         }
     }
 
+    // Mở thư mục được chọn trên cây.
+    async function openFolderFromTree(folder) {
+        if (actionDisabled || moveLock.current) {
+            return;
+        }
+
+        clearMessages();
+        setBusy(true);
+
+        try {
+            const nextPath = [];
+            const visited = new Set();
+            let id = folder.id;
+
+            while (id != null) {
+                if (visited.has(id)) {
+                    throw new Error('Cấu trúc thư mục bị vòng lặp.');
+                }
+
+                visited.add(id);
+
+                const data = await api.getFolder(id);
+
+                nextPath.unshift(data);
+                id = data.parentId ?? null;
+            }
+
+            closeForm();
+            setPath(nextPath);
+        } catch (err) {
+            setError(err.message);
+        } finally {
+            setBusy(false);
+        }
+    }
+
+    // Xem nội dung PDF/ảnh.
+    async function openDocument(folderId, document) {
+        if (actionDisabled || moveLock.current) {
+            return;
+        }
+
+        clearMessages();
+        setBusy(true);
+
+        try {
+            const blob = await api.documentContent(
+                folderId,
+                document.id
+            );
+
+            const url = URL.createObjectURL(blob);
+
+            setPreview({
+                url,
+                title: document.title || document.originalName,
+                originalName: document.originalName,
+                mimeType: blob.type || document.mimeType,
+            });
+        } catch (err) {
+            setError(err.message);
+        } finally {
+            setBusy(false);
+        }
+    }
+
+    // Báo danh sách và cây tải lại tài liệu.
+    function refreshDocuments() {
+        setDocumentsReload((value) => value + 1);
+    }
+
+    // Hàm phụ dùng chung cho các thao tác tài liệu.
+    // Chặn bấm lặp, bật/tắt busy và xử lý lỗi.
+    async function runDocumentAction(operation) {
+        if (
+            documentLock.current ||
+            busy ||
+            loading ||
+            showForm ||
+            moveLock.current
+        ) {
+            return;
+        }
+
+        documentLock.current = true;
+        clearMessages();
+        setBusy(true);
+
+        try {
+            await operation();
+        } catch (err) {
+            setError(err.message);
+        } finally {
+            documentLock.current = false;
+            setBusy(false);
+        }
+    }
+
+    // Nút Chi tiết.
+    async function showDocumentDetail(folderId, document) {
+        if (actionDisabled) return;
+
+        await runDocumentAction(async () => {
+            const detail = await api.documentDetail(
+                folderId,
+                document.id
+            );
+
+            setDocumentAction({
+                type: 'detail',
+                folderId,
+                document: detail,
+            });
+        });
+    }
+
+    // Nút Đổi tên: chỉ mở form.
+    function startRenameDocument(folderId, document) {
+        if (actionDisabled || documentLock.current) {
+            return;
+        }
+
+        clearMessages();
+        setDocumentName(document.originalName);
+
+        setDocumentAction({
+            type: 'rename',
+            folderId,
+            document,
+        });
+    }
+
+    // Nút Lưu tên mới: gọi backend.
+    async function saveDocumentName(event) {
+        event.preventDefault();
+
+        if (documentAction?.type !== 'rename') {
+            return;
+        }
+
+        const originalName = documentName.trim();
+
+        if (!originalName) {
+            setError('Nhập tên file, bao gồm phần mở rộng.');
+            return;
+        }
+
+        const action = documentAction;
+
+        await runDocumentAction(async () => {
+            await api.renameDocument(
+                action.folderId,
+                action.document.id,
+                originalName
+            );
+
+            setDocumentAction(null);
+            setPreview(null);
+            refreshDocuments();
+            setSuccess('Đã đổi tên file.');
+        });
+    }
+
+    // Hàm phụ: lấy các thư mục để chọn đích di chuyển.
+    async function loadDestinationFolders() {
+        const result = [];
+        const visited = new Set();
+
+        const queue = [
+            { parentId: null, prefix: '' },
+        ];
+
+        for (let index = 0; index < queue.length; index += 1) {
+            const item = queue[index];
+
+            const children = await api.folders(item.parentId);
+
+            if (!Array.isArray(children)) {
+                throw new Error(
+                    'API danh sách thư mục chưa trả về một mảng.'
+                );
+            }
+
+            for (const folder of children) {
+                if (visited.has(folder.id)) {
+                    continue;
+                }
+
+                visited.add(folder.id);
+
+                const label = item.prefix
+                    ? `${item.prefix} / ${folder.name}`
+                    : folder.name;
+
+                result.push({
+                    id: folder.id,
+                    label,
+                });
+
+                queue.push({
+                    parentId: folder.id,
+                    prefix: label,
+                });
+            }
+        }
+
+        return result;
+    }
+
+    // Nút Di chuyển: lấy thư mục rồi mở form.
+    async function startMoveDocument(folderId, document) {
+        if (actionDisabled) return;
+
+        await runDocumentAction(async () => {
+            const choices = await loadDestinationFolders();
+
+            setDestinationFolders(
+                choices.filter((folder) => folder.id !== folderId)
+            );
+
+            setTargetFolderId('');
+
+            setDocumentAction({
+                type: 'move',
+                folderId,
+                document,
+            });
+        });
+    }
+
+    // Nút Xác nhận di chuyển.
+    async function saveDocumentMove(event) {
+        event.preventDefault();
+
+        if (documentAction?.type !== 'move') {
+            return;
+        }
+
+        if (!targetFolderId) {
+            setError('Chọn thư mục đích.');
+            return;
+        }
+
+        const action = documentAction;
+
+        await runDocumentAction(async () => {
+            await api.moveDocument(
+                action.folderId,
+                action.document.id,
+                Number(targetFolderId)
+            );
+
+            setDocumentAction(null);
+            setPreview(null);
+            refreshDocuments();
+
+            setSuccess('Đã chuyển tài liệu sang thư mục đích.');
+        });
+    }
+
+    // Nút Xóa.
+    async function deleteDocument(folderId, document) {
+        if (actionDisabled || documentLock.current) {
+            return;
+        }
+
+        if (
+            !window.confirm(
+                `Xóa tài liệu "${document.originalName}"?`
+            )
+        ) {
+            return;
+        }
+
+        await runDocumentAction(async () => {
+            await api.deleteDocument(folderId, document.id);
+
+            setPreview(null);
+            refreshDocuments();
+            setSuccess('Đã xóa mềm tài liệu.');
+        });
+    }
+
+    // Nút Tải xuống.
+    async function downloadDocument(folderId, item) {
+        if (actionDisabled) return;
+
+        await runDocumentAction(async () => {
+            const blob = await api.downloadDocument(
+                folderId,
+                item.id
+            );
+
+            const url = URL.createObjectURL(blob);
+            const link = window.document.createElement('a');
+
+            link.href = url;
+            link.download = item.originalName;
+
+            window.document.body.appendChild(link);
+
+            try {
+                link.click();
+            } finally {
+                link.remove();
+
+                window.setTimeout(
+                    () => URL.revokeObjectURL(url),
+                    60000
+                );
+            }
+
+            setSuccess('Đã gửi file cho trình duyệt tải xuống.');
+        });
+    }
+
+    function closeDocumentAction() {
+        if (busy || documentLock.current) {
+            return;
+        }
+
+        setDocumentAction(null);
+        setError('');
+    }
+
     function goBack() {
         clearMessages();
         closeForm();
@@ -191,7 +546,9 @@ export default function FoldersPage({ onLogout }) {
         setUploadSuccess('');
 
         if (parentId == null) {
-            setUploadError('Mở một thư mục trước khi tải tài liệu lên.');
+            setUploadError(
+                'Mở một thư mục trước khi tải tài liệu lên.'
+            );
             return;
         }
 
@@ -200,61 +557,37 @@ export default function FoldersPage({ onLogout }) {
             return;
         }
 
-        const token = localStorage.getItem('accessToken');
-
-        if (!token) {
-            setUploadError('Bạn cần đăng nhập.');
+        if (!metadata.title.trim()) {
+            setUploadError('Nhập tên văn bản.');
             return;
         }
 
         const selectedFile = file;
-        const formData = new FormData();
-        formData.append('file', selectedFile);
 
         uploadLock.current = true;
         setBusy(true);
 
         try {
-            const response = await fetch(
-                `/api/folders/${encodeURIComponent(parentId)}/documents`,
+            await api.uploadDocument(
+                parentId,
+                selectedFile,
                 {
-                    method: 'POST',
-                    headers: {
-                        Authorization: `Bearer ${token}`,
-                    },
-                    body: formData,
+                    ...metadata,
+                    title: metadata.title.trim(),
                 }
             );
-
-            const text = await response.text();
-
-            let data;
-
-            try {
-                data = text ? JSON.parse(text) : null;
-            } catch {
-                data = text;
-            }
-
-            if (!response.ok) {
-                throw new Error(
-                    typeof data === 'string'
-                        ? data
-                        : data?.message || 'Không tải được tài liệu lên.'
-                );
-            }
 
             setUploadSuccess(
                 `Đã tải lên file "${selectedFile.name}".`
             );
 
             setFile(null);
+            setMetadata(emptyMetadata());
 
             if (fileInputRef.current) {
                 fileInputRef.current.value = '';
             }
 
-            // Tải lại danh sách tài liệu sau khi upload.
             setDocumentsReload((value) => value + 1);
         } catch (err) {
             setUploadError(err.message);
@@ -263,6 +596,8 @@ export default function FoldersPage({ onLogout }) {
             setBusy(false);
         }
     }
+
+    // ===== KÉO THẢ THƯ MỤC =====
 
     function handleDragStart(event, folder) {
         event.stopPropagation();
@@ -279,6 +614,7 @@ export default function FoldersPage({ onLogout }) {
         };
 
         event.dataTransfer.effectAllowed = 'move';
+
         event.dataTransfer.setData(
             FOLDER_DRAG_TYPE,
             JSON.stringify(payload)
@@ -355,9 +691,7 @@ export default function FoldersPage({ onLogout }) {
 
         const raw = event.dataTransfer.getData(FOLDER_DRAG_TYPE);
 
-        if (!raw) {
-            return;
-        }
+        if (!raw) return;
 
         let source;
 
@@ -407,10 +741,17 @@ export default function FoldersPage({ onLogout }) {
         }
     }
 
+    // Các hàm và dữ liệu truyền xuống cây thư mục.
     const interaction = {
         disabled: actionDisabled,
         draggedFolderId: draggedFolder?.id ?? null,
         dropTarget,
+
+        selectedFolderId: parentId,
+        documentsReload,
+        onOpen: openFolderFromTree,
+        onOpenDocument: openDocument,
+
         onDragStart: handleDragStart,
         onDragEnd: handleDragEnd,
         onDragOver: handleDragOver,
@@ -481,15 +822,6 @@ export default function FoldersPage({ onLogout }) {
                             </div>
                         </div>
 
-                        <p className="folders-location">
-                            Vị trí: Gốc
-                            {path.map((folder) => (
-                                <span key={folder.id}>
-                                    {' / '}{folder.name}
-                                </span>
-                            ))}
-                        </p>
-
                         {currentFolder && (
                             <>
                                 <form
@@ -509,17 +841,27 @@ export default function FoldersPage({ onLogout }) {
                                         disabled={actionDisabled}
                                         onChange={(event) => {
                                             setFile(
-                                                event.target.files?.[0] ?? null
+                                                event.target.files?.[0] ??
+                                                null
                                             );
+
                                             setUploadError('');
                                             setUploadSuccess('');
                                         }}
                                     />
 
+                                    <DocumentMetadataForm
+                                        value={metadata}
+                                        onChange={setMetadata}
+                                        disabled={actionDisabled}
+                                    />
+
                                     <button
                                         type="submit"
                                         className="folders-primary"
-                                        disabled={actionDisabled || !file}
+                                        disabled={
+                                            actionDisabled || !file
+                                        }
                                     >
                                         {uploadLock.current
                                             ? 'Đang tải lên...'
@@ -545,9 +887,20 @@ export default function FoldersPage({ onLogout }) {
                                     )}
                                 </form>
 
+                                {/* Truyền các hàm xử lý xuống danh sách. */}
                                 <DocumentList
+                                    key={parentId}
                                     folderId={parentId}
                                     reload={documentsReload}
+                                    disabled={actionDisabled}
+                                    onBusyChange={setBusy}
+                                    onOpenDocument={openDocument}
+                                    onDetailDocument={showDocumentDetail}
+                                    onRenameDocument={startRenameDocument}
+                                    onMoveDocument={startMoveDocument}
+                                    onDeleteDocument={deleteDocument}
+                                    onDownloadDocument={downloadDocument}
+                                    onDocumentsChanged={refreshDocuments}
                                 />
                             </>
                         )}
@@ -623,11 +976,16 @@ export default function FoldersPage({ onLogout }) {
                             <p role="status">Đang xử lý...</p>
                         )}
 
-                        {loading && <p>Đang tải thư mục...</p>}
+                        {loading && (
+                            <p>Đang tải thư mục...</p>
+                        )}
 
                         {!loading && loadError && (
                             <>
-                                <p className="message error" role="alert">
+                                <p
+                                    className="message error"
+                                    role="alert"
+                                >
                                     {loadError}
                                 </p>
 
@@ -654,11 +1012,17 @@ export default function FoldersPage({ onLogout }) {
                                             className="folders-item"
                                             draggable={!actionDisabled}
                                             onDragStart={(event) =>
-                                                handleDragStart(event, folder)
+                                                handleDragStart(
+                                                    event,
+                                                    folder
+                                                )
                                             }
                                             onDragEnd={handleDragEnd}
                                             onDragOver={(event) =>
-                                                handleDragOver(event, folder)
+                                                handleDragOver(
+                                                    event,
+                                                    folder
+                                                )
                                             }
                                             onDragLeave={handleDragLeave}
                                             onDrop={(event) =>
@@ -666,17 +1030,18 @@ export default function FoldersPage({ onLogout }) {
                                             }
                                             style={{
                                                 background:
-                                                    dropTarget === String(folder.id)
+                                                    dropTarget ===
+                                                    String(folder.id)
                                                         ? '#dbeafe'
                                                         : undefined,
                                                 opacity:
-                                                    draggedFolder?.id === folder.id
+                                                    draggedFolder?.id ===
+                                                    folder.id
                                                         ? 0.45
                                                         : 1,
-                                                cursor:
-                                                    actionDisabled
-                                                        ? 'default'
-                                                        : 'grab',
+                                                cursor: actionDisabled
+                                                    ? 'default'
+                                                    : 'grab',
                                             }}
                                         >
                                             <div className="folders-info">
@@ -739,6 +1104,367 @@ export default function FoldersPage({ onLogout }) {
                     </section>
                 </div>
             </div>
+
+            {/* Khung Chi tiết / Đổi tên / Di chuyển tài liệu. */}
+            {documentAction && (
+                <div
+                    style={{
+                        position: 'fixed',
+                        inset: 0,
+                        zIndex: 1100,
+                        background: 'rgba(0,0,0,0.55)',
+                        padding: '20px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                    }}
+                    onKeyDown={(event) => {
+                        if (event.key === 'Escape') {
+                            closeDocumentAction();
+                        }
+                    }}
+                >
+                    <section
+                        role="dialog"
+                        aria-modal="true"
+                        aria-labelledby="document-action-title"
+                        style={{
+                            background: '#fff',
+                            borderRadius: '12px',
+                            padding: '20px',
+                            width: 'min(650px, 100%)',
+                            maxHeight: '85vh',
+                            overflow: 'auto',
+                            overflowWrap: 'anywhere',
+                        }}
+                    >
+                        <h2 id="document-action-title">
+                            {documentAction.type === 'detail'
+                                ? 'Chi tiết tài liệu'
+                                : documentAction.type === 'rename'
+                                    ? 'Đổi tên file'
+                                    : 'Di chuyển tài liệu'}
+                        </h2>
+
+                        {documentAction.type === 'detail' && (
+                            <dl>
+                                {[
+                                    [
+                                        'Tên văn bản',
+                                        documentAction.document.title,
+                                    ],
+                                    [
+                                        'Tên file',
+                                        documentAction.document.originalName,
+                                    ],
+                                    [
+                                        'Số hiệu',
+                                        documentAction.document.documentNumber,
+                                    ],
+                                    [
+                                        'Loại văn bản',
+                                        documentAction.document.documentType,
+                                    ],
+                                    [
+                                        'Ngày ban hành',
+                                        documentAction.document.issuedDate
+                                            ? new Date(
+                                                documentAction.document.issuedDate
+                                            ).toLocaleDateString('vi-VN')
+                                            : null,
+                                    ],
+                                    [
+                                        'Đơn vị/người ban hành',
+                                        documentAction.document.issuer,
+                                    ],
+                                    [
+                                        'Từ khóa',
+                                        documentAction.document.keywords,
+                                    ],
+                                    [
+                                        'Mô tả',
+                                        documentAction.document.description,
+                                    ],
+                                    [
+                                        'Định dạng file',
+                                        documentAction.document.mimeType,
+                                    ],
+                                    [
+                                        'Dung lượng',
+                                        `${
+                                            (
+                                                documentAction.document.size /
+                                                1024
+                                            ).toFixed(1)
+                                        } KB`,
+                                    ],
+                                    [
+                                        'Tải lên',
+                                        documentAction.document.uploadedAt
+                                            ? new Date(
+                                                documentAction.document.uploadedAt
+                                            ).toLocaleString('vi-VN')
+                                            : null,
+                                    ],
+                                ].map(([label, value]) => (
+                                    <div
+                                        key={label}
+                                        style={{ marginBottom: '12px' }}
+                                    >
+                                        <dt>
+                                            <strong>{label}</strong>
+                                        </dt>
+
+                                        <dd
+                                            style={{
+                                                margin: 0,
+                                                whiteSpace: 'pre-wrap',
+                                            }}
+                                        >
+                                            {value || '—'}
+                                        </dd>
+                                    </div>
+                                ))}
+                            </dl>
+                        )}
+
+                        {documentAction.type === 'rename' && (
+                            <form
+                                className="folders-form"
+                                onSubmit={saveDocumentName}
+                            >
+                                <label htmlFor="document-new-name">
+                                    Tên file mới
+                                </label>
+
+                                <input
+                                    autoFocus
+                                    id="document-new-name"
+                                    value={documentName}
+                                    maxLength={255}
+                                    required
+                                    disabled={busy}
+                                    onChange={(event) =>
+                                        setDocumentName(event.target.value)
+                                    }
+                                />
+
+                                <p>
+                                    Giữ nguyên đuôi file,
+                                    ví dụ: BaoCaoMoi.pdf.
+                                </p>
+
+                                <button
+                                    type="submit"
+                                    disabled={busy}
+                                    className="folders-primary"
+                                >
+                                    {busy
+                                        ? 'Đang lưu...'
+                                        : 'Lưu tên mới'}
+                                </button>
+                            </form>
+                        )}
+
+                        {documentAction.type === 'move' && (
+                            <form
+                                className="folders-form"
+                                onSubmit={saveDocumentMove}
+                            >
+                                <p>
+                                    File:{' '}
+                                    {documentAction.document.originalName}
+                                </p>
+
+                                <label htmlFor="document-target-folder">
+                                    Thư mục đích
+                                </label>
+
+                                <select
+                                    autoFocus
+                                    id="document-target-folder"
+                                    value={targetFolderId}
+                                    required
+                                    disabled={
+                                        busy ||
+                                        destinationFolders.length === 0
+                                    }
+                                    onChange={(event) =>
+                                        setTargetFolderId(event.target.value)
+                                    }
+                                >
+                                    <option value="">
+                                        Chọn thư mục
+                                    </option>
+
+                                    {destinationFolders.map((folder) => (
+                                        <option
+                                            key={folder.id}
+                                            value={folder.id}
+                                        >
+                                            {folder.label}
+                                        </option>
+                                    ))}
+                                </select>
+
+                                {destinationFolders.length === 0 && (
+                                    <p>
+                                        Chưa có thư mục khác.
+                                        Tạo một thư mục trước khi di chuyển.
+                                    </p>
+                                )}
+
+                                <button
+                                    type="submit"
+                                    className="folders-primary"
+                                    disabled={busy || !targetFolderId}
+                                >
+                                    {busy
+                                        ? 'Đang chuyển...'
+                                        : 'Xác nhận di chuyển'}
+                                </button>
+                            </form>
+                        )}
+
+                        {error && (
+                            <p className="message error" role="alert">
+                                {error}
+                            </p>
+                        )}
+
+                        <button
+                            type="button"
+                            autoFocus={documentAction.type === 'detail'}
+                            disabled={busy}
+                            onClick={closeDocumentAction}
+                        >
+                            {documentAction.type === 'detail'
+                                ? 'Đóng'
+                                : 'Hủy'}
+                        </button>
+                    </section>
+                </div>
+            )}
+
+            {/* Khung xem nội dung PDF/ảnh. */}
+            {preview && (
+                <div
+                    onKeyDown={(event) => {
+                        if (event.key === 'Escape') {
+                            setPreview(null);
+                        }
+                    }}
+                    style={{
+                        position: 'fixed',
+                        inset: 0,
+                        zIndex: 1000,
+                        background: 'rgba(0,0,0,0.55)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        padding: '20px',
+                    }}
+                >
+                    <section
+                        role="dialog"
+                        aria-modal="true"
+                        aria-labelledby="document-preview-title"
+                        style={{
+                            width: 'min(1100px, 100%)',
+                            height: '85vh',
+                            background: '#fff',
+                            borderRadius: '12px',
+                            padding: '16px',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            boxSizing: 'border-box',
+                        }}
+                    >
+                        <div
+                            style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'space-between',
+                                gap: '12px',
+                                marginBottom: '12px',
+                            }}
+                        >
+                            <h2
+                                id="document-preview-title"
+                                style={{
+                                    margin: 0,
+                                    overflowWrap: 'anywhere',
+                                }}
+                            >
+                                {preview.title}
+                            </h2>
+
+                            <div
+                                style={{
+                                    display: 'flex',
+                                    gap: '12px',
+                                    alignItems: 'center',
+                                    flexShrink: 0,
+                                }}
+                            >
+                                <a
+                                    href={preview.url}
+                                    download={preview.originalName}
+                                >
+                                    Tải xuống
+                                </a>
+
+                                <button
+                                    autoFocus
+                                    type="button"
+                                    onClick={() => setPreview(null)}
+                                >
+                                    Đóng
+                                </button>
+                            </div>
+                        </div>
+
+                        <div
+                            style={{
+                                flex: 1,
+                                minHeight: 0,
+                                overflow: 'auto',
+                            }}
+                        >
+                            {['image/jpeg', 'image/png'].includes(
+                                preview.mimeType
+                            ) ? (
+                                <img
+                                    src={preview.url}
+                                    alt={preview.title}
+                                    style={{
+                                        display: 'block',
+                                        maxWidth: '100%',
+                                        maxHeight: '100%',
+                                        objectFit: 'contain',
+                                        margin: '0 auto',
+                                    }}
+                                />
+                            ) : preview.mimeType === 'application/pdf' ? (
+                                <iframe
+                                    src={preview.url}
+                                    title={preview.title}
+                                    style={{
+                                        width: '100%',
+                                        height: '100%',
+                                        border: 0,
+                                    }}
+                                />
+                            ) : (
+                                <p>
+                                    File Word chưa hỗ trợ xem trực tiếp.
+                                    Bấm “Tải xuống” để mở bằng Word.
+                                </p>
+                            )}
+                        </div>
+                    </section>
+                </div>
+            )}
         </main>
     );
 }

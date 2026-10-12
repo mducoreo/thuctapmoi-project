@@ -1,39 +1,75 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api } from './api.js';
 
 export default function FolderTreeNode({ folder, interaction }) {
     const [expanded, setExpanded] = useState(false);
     const [children, setChildren] = useState([]);
+    const [documents, setDocuments] = useState([]);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
+    const [retry, setRetry] = useState(0);
 
-    async function toggle() {
-        if (loading || interaction.disabled) {
+    const documentsReload = interaction.documentsReload;
+
+    useEffect(() => {
+        if (!expanded) {
             return;
         }
 
-        if (expanded) {
-            setExpanded(false);
+        let active = true;
+
+        async function loadContents() {
+            setLoading(true);
+            setError('');
+
+            try {
+                const [folderData, documentData] = await Promise.all([
+                    api.folders(folder.id),
+                    api.documents(folder.id),
+                ]);
+
+                if (active) {
+                    setChildren(folderData);
+                    setDocuments(documentData);
+                }
+            } catch (err) {
+                if (active) {
+                    setError(err.message);
+                }
+            } finally {
+                if (active) {
+                    setLoading(false);
+                }
+            }
+        }
+
+        loadContents();
+
+        return () => {
+            active = false;
+        };
+    }, [expanded, folder.id, documentsReload, retry]);
+
+    function toggle() {
+        if (interaction.disabled) {
             return;
         }
 
-        setLoading(true);
-        setError('');
+        setExpanded((previous) => !previous);
+    }
 
-        try {
-            const data = await api.folders(folder.id);
-
-            setChildren(data);
-            setExpanded(true);
-        } catch (err) {
-            setError(err.message);
-        } finally {
-            setLoading(false);
+    function openFolder() {
+        if (interaction.disabled) {
+            return;
         }
+
+        setExpanded(true);
+        interaction.onOpen(folder);
     }
 
     const isDragging = interaction.draggedFolderId === folder.id;
     const isDropTarget = interaction.dropTarget === String(folder.id);
+    const isSelected = interaction.selectedFolderId === folder.id;
 
     return (
         <div>
@@ -51,10 +87,17 @@ export default function FolderTreeNode({ folder, interaction }) {
                     interaction.onDrop(event, folder)
                 }
                 style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '4px',
                     padding: '4px',
                     marginBottom: '4px',
                     borderRadius: '6px',
-                    background: isDropTarget ? '#dbeafe' : 'transparent',
+                    background: isDropTarget
+                        ? '#dbeafe'
+                        : isSelected
+                            ? '#eff6ff'
+                            : 'transparent',
                     opacity: isDragging ? 0.45 : 1,
                     cursor: interaction.disabled ? 'default' : 'grab',
                 }}
@@ -62,27 +105,97 @@ export default function FolderTreeNode({ folder, interaction }) {
                 <button
                     type="button"
                     onClick={toggle}
-                    disabled={loading || interaction.disabled}
+                    disabled={interaction.disabled}
+                    aria-expanded={expanded}
+                    aria-label={
+                        expanded
+                            ? `Thu gọn ${folder.name}`
+                            : `Mở rộng ${folder.name}`
+                    }
                 >
-                    {loading ? '…' : expanded ? '▼' : '▶'}
-                    {' '}📁 {folder.name}
+                    {expanded ? '▼' : '▶'}
+                </button>
+
+                <button
+                    type="button"
+                    onClick={openFolder}
+                    disabled={interaction.disabled}
+                    aria-current={isSelected ? 'true' : undefined}
+                    style={{
+                        textAlign: 'left',
+                        overflowWrap: 'anywhere',
+                        fontWeight: isSelected ? 'bold' : 'normal',
+                    }}
+                >
+                    📁 {folder.name}
                 </button>
             </div>
 
-            {error && <p role="alert">{error}</p>}
-
             {expanded && (
                 <div style={{ marginLeft: 24 }}>
-                    {children.length === 0 ? (
-                        <p>Không có thư mục con.</p>
-                    ) : (
-                        children.map((child) => (
-                            <FolderTreeNode
-                                key={child.id}
-                                folder={child}
-                                interaction={interaction}
-                            />
-                        ))
+                    {loading && (
+                        <p role="status">Đang tải...</p>
+                    )}
+
+                    {!loading && error && (
+                        <div>
+                            <p role="alert">{error}</p>
+
+                            <button
+                                type="button"
+                                disabled={interaction.disabled}
+                                onClick={() =>
+                                    setRetry((value) => value + 1)
+                                }
+                            >
+                                Thử lại
+                            </button>
+                        </div>
+                    )}
+
+                    {!loading && !error && (
+                        <>
+                            {children.map((child) => (
+                                <FolderTreeNode
+                                    key={child.id}
+                                    folder={child}
+                                    interaction={interaction}
+                                />
+                            ))}
+
+                            {/* Bấm tên tài liệu để mở khung xem. */}
+                            {documents.map((document) => (
+                                <button
+                                    key={document.id}
+                                    type="button"
+                                    title={document.originalName}
+                                    disabled={interaction.disabled}
+                                    onClick={() =>
+                                        interaction.onOpenDocument(
+                                            folder.id,
+                                            document
+                                        )
+                                    }
+                                    style={{
+                                        display: 'block',
+                                        width: '100%',
+                                        padding: '6px 4px',
+                                        marginBottom: '4px',
+                                        textAlign: 'left',
+                                        overflowWrap: 'anywhere',
+                                    }}
+                                >
+                                    📄{' '}
+                                    {document.title ||
+                                        document.originalName}
+                                </button>
+                            ))}
+
+                            {children.length === 0 &&
+                                documents.length === 0 && (
+                                    <p>Thư mục trống.</p>
+                                )}
+                        </>
                     )}
                 </div>
             )}
