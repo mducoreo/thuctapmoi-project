@@ -163,4 +163,18 @@ public class DocumentController {
                 authentication.getName()
         );
     }
+    @DeleteMapping("/{documentId}/permanent")
+    public ResponseEntity<Void> permanentDelete(
+            @PathVariable Long folderId,
+            @PathVariable Long documentId,
+            Authentication authentication
+    ) {
+        service.permanentDelete(
+                folderId,
+                documentId,
+                authentication.getName()
+        );
+
+        return ResponseEntity.noContent().build();
+    }
 }

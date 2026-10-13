@@ -238,6 +238,14 @@ export const api = {
             true
         );
     },
+    permanentDeleteDocument(folderId, documentId) {
+        return request(
+            `/folders/${folderId}/documents/${documentId}/permanent`,
+            undefined,
+            'DELETE',
+            true
+        );
+    },
 
     // GET: nội dung file để xem, giữ tên hàm đang dùng.
     documentContent(folderId, documentId) {

@@ -10,9 +10,6 @@ import com.example.thuctapmoi.entity.User;
 import com.example.thuctapmoi.repository.DocumentRepository;
 import com.example.thuctapmoi.repository.FolderRepository;
 import com.example.thuctapmoi.repository.UserRepository;
-import org.apache.tika.Tika;
-import org.apache.tika.io.TikaInputStream;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -20,51 +17,38 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.util.List;
-import java.util.Locale;
-import java.util.Map;
 
 @Service
 public class DocumentService {
 
-    private static final long MAX_FILE_SIZE = 10L * 1024 * 1024;
-
-    private static final Map<String, String> ALLOWED_TYPES = Map.of(
-            "pdf", "application/pdf",
-            "doc", "application/msword",
-            "docx",
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            "jpg", "image/jpeg",
-            "jpeg", "image/jpeg",
-            "png", "image/png"
-    );
-
     private final DocumentRepository documentRepository;
     private final FolderRepository folderRepository;
     private final UserRepository userRepository;
-    private final Path uploadDir;
-    private final Tika tika = new Tika();
+    private final FileStorageService fileStorageService;
+    private final DocumentFileValidator fileValidator;
 
     public DocumentService(
             DocumentRepository documentRepository,
             FolderRepository folderRepository,
             UserRepository userRepository,
-            @Value("${app.storage.upload-dir}") String uploadDir
+            FileStorageService fileStorageService,
+            DocumentFileValidator fileValidator
     ) {
         this.documentRepository = documentRepository;
         this.folderRepository = folderRepository;
         this.userRepository = userRepository;
-        this.uploadDir = Path.of(uploadDir)
-                .toAbsolutePath()
-                .normalize();
+        this.fileStorageService = fileStorageService;
+        this.fileValidator = fileValidator;
     }
 
     // ===== CÁC METHOD CHÍNH =====
@@ -79,46 +63,30 @@ public class DocumentService {
         User user = currentUser(username);
         Folder folder = ownedFolder(folderId, user);
 
-        validateSize(file);
+        fileValidator.validateSize(file);
 
-        String originalName = originalName(file);
-        String extension = extension(originalName);
+        String originalName = fileValidator.originalName(file);
+        String extension = fileValidator.extension(originalName);
         Path savedPath = null;
 
         try {
             byte[] content = file.getBytes();
-            String mimeType;
 
-            try (TikaInputStream input = TikaInputStream.get(content)) {
-                mimeType = tika.detect(input);
-            }
-
-            String expectedMime = ALLOWED_TYPES.get(extension);
-
-            if (!expectedMime.equals(mimeType)) {
-                throw new ResponseStatusException(
-                        HttpStatus.UNSUPPORTED_MEDIA_TYPE,
-                        "Nội dung file không phù hợp với định dạng đã chọn"
-                );
-            }
-
-            Path folderPath = uploadDir.resolve("folder-" + folderId);
-            Files.createDirectories(folderPath);
-
-            savedPath = Files.createTempFile(
-                    folderPath,
-                    "document-",
-                    "." + extension
+            String mimeType = fileValidator.validateContent(
+                    content,
+                    extension
             );
 
-            Files.write(savedPath, content);
+            savedPath = fileStorageService.save(
+                    folderId,
+                    content,
+                    extension
+            );
 
             Document document = new Document();
             document.setOriginalName(originalName);
             document.setStoredName(
-                    uploadDir.relativize(savedPath)
-                            .toString()
-                            .replace('\\', '/')
+                    fileStorageService.storedName(savedPath)
             );
             document.setMimeType(mimeType);
             document.setSize((long) content.length);
@@ -132,7 +100,10 @@ public class DocumentService {
             return toResponse(saved);
 
         } catch (IOException exception) {
-            removeFailedUpload(savedPath, exception);
+            fileStorageService.removeFailedUpload(
+                    savedPath,
+                    exception
+            );
 
             throw new ResponseStatusException(
                     HttpStatus.INTERNAL_SERVER_ERROR,
@@ -141,7 +112,10 @@ public class DocumentService {
             );
 
         } catch (RuntimeException exception) {
-            removeFailedUpload(savedPath, exception);
+            fileStorageService.removeFailedUpload(
+                    savedPath,
+                    exception
+            );
             throw exception;
         }
     }
@@ -204,7 +178,7 @@ public class DocumentService {
         User user = currentUser(username);
         Document document = ownedDocument(folderId, documentId, user);
 
-        String name = validateRename(
+        String name = fileValidator.validateRename(
                 request.getOriginalName(),
                 document.getOriginalName()
         );
@@ -223,7 +197,6 @@ public class DocumentService {
             String username
     ) {
         User user = currentUser(username);
-
         Document document = ownedDocument(folderId, documentId, user);
 
         // Thư mục đích phải tồn tại và thuộc người đang đăng nhập.
@@ -286,6 +259,79 @@ public class DocumentService {
         return fileResponse(document, true);
     }
 
+    // 10. Xóa vĩnh viễn bản ghi và file trên ổ đĩa.
+    @Transactional
+    public void permanentDelete(
+            Long folderId,
+            Long documentId,
+            String username
+    ) {
+        User user = currentUser(username);
+        ownedFolder(folderId, user);
+
+        // Không dùng ownedDocument vì hàm đó chặn tài liệu đã xóa mềm.
+        Document document = documentRepository.findById(documentId)
+                .orElseThrow(() -> new ResponseStatusException(
+                        HttpStatus.NOT_FOUND,
+                        "Tài liệu không tồn tại"
+                ));
+
+        if (!document.getFolder().getId().equals(folderId)) {
+            throw new ResponseStatusException(
+                    HttpStatus.NOT_FOUND,
+                    "Tài liệu không nằm trong thư mục này"
+            );
+        }
+
+        if (!document.getOwner().getId().equals(user.getId())) {
+            throw new ResponseStatusException(
+                    HttpStatus.FORBIDDEN,
+                    "Bạn không có quyền xóa tài liệu này"
+            );
+        }
+
+        FileStorageService.PendingDelete pending =
+                fileStorageService.prepareDelete(
+                        document.getStoredName()
+                );
+
+        if (pending != null) {
+            // Storage xử lý file; DocumentService quản lý transaction.
+            TransactionSynchronizationManager.registerSynchronization(
+                    new TransactionSynchronization() {
+
+                        @Override
+                        public void afterCommit() {
+                            // Database đã xóa thành công: xóa file thật.
+                            fileStorageService.finishDelete(pending);
+                        }
+
+                        @Override
+                        public void afterCompletion(int status) {
+                            // Database rollback: trả file về tên ban đầu.
+                            if (status == STATUS_ROLLED_BACK) {
+                                try {
+                                    fileStorageService.restoreDelete(pending);
+                                } catch (IOException exception) {
+                                    org.slf4j.LoggerFactory
+                                            .getLogger(DocumentService.class)
+                                            .error(
+                                                    "Không thể khôi phục file sau rollback: {}",
+                                                    pending.originalPath(),
+                                                    exception
+                                            );
+                                }
+                            }
+                        }
+                    }
+            );
+        }
+
+        // File đã mất thì vẫn cho phép dọn bản ghi trong database.
+        documentRepository.delete(document);
+        documentRepository.flush();
+    }
+
     // ===== CÁC METHOD PHỤ =====
 
     // Tìm người đang đăng nhập.
@@ -330,7 +376,6 @@ public class DocumentService {
                         "Tài liệu không tồn tại"
                 ));
 
-        // Tài liệu đã xóa không được tiếp tục sử dụng.
         if (document.getDeletedAt() != null) {
             throw new ResponseStatusException(
                     HttpStatus.NOT_FOUND,
@@ -355,162 +400,37 @@ public class DocumentService {
         return document;
     }
 
-    // Kiểm tra tên mới, giữ nguyên phần mở rộng.
-    private String validateRename(String input, String oldName) {
-        if (input == null || input.isBlank()) {
-            throw new ResponseStatusException(
-                    HttpStatus.BAD_REQUEST,
-                    "Tên file không được để trống"
-            );
-        }
-
-        String name = input.trim();
-
-        if (name.length() > 255
-                || name.matches(".*[\\\\/:*?\"<>|].*")
-                || name.chars().anyMatch(Character::isISOControl)) {
-            throw new ResponseStatusException(
-                    HttpStatus.BAD_REQUEST,
-                    "Tên file không hợp lệ hoặc dài quá 255 ký tự"
-            );
-        }
-
-        String oldExtension = extension(oldName);
-        String newExtension = extension(name);
-
-        if (!oldExtension.equals(newExtension)) {
-            throw new ResponseStatusException(
-                    HttpStatus.BAD_REQUEST,
-                    "Đổi tên phải giữ nguyên đuôi ." + oldExtension
-            );
-        }
-
-        return name;
-    }
-
-    // Đọc file và tạo phản hồi dùng chung cho xem/tải xuống.
+    // Tạo phản hồi dùng chung cho xem/tải xuống.
     private ResponseEntity<byte[]> fileResponse(
             Document document,
             boolean download
     ) {
-        Path filePath = uploadDir
-                .resolve(document.getStoredName())
-                .normalize();
+        byte[] fileContent = fileStorageService.read(
+                document.getStoredName()
+        );
 
-        if (!filePath.startsWith(uploadDir)) {
-            throw new ResponseStatusException(
-                    HttpStatus.FORBIDDEN,
-                    "Đường dẫn tài liệu không hợp lệ"
-            );
-        }
+        ContentDisposition disposition = (
+                download
+                        ? ContentDisposition.attachment()
+                        : ContentDisposition.inline()
+        )
+                .filename(
+                        document.getOriginalName(),
+                        StandardCharsets.UTF_8
+                )
+                .build();
 
-        if (!Files.isRegularFile(filePath)) {
-            throw new ResponseStatusException(
-                    HttpStatus.NOT_FOUND,
-                    "Không tìm thấy file trên ổ đĩa"
-            );
-        }
-
-        try {
-            byte[] fileContent = Files.readAllBytes(filePath);
-
-            ContentDisposition disposition = (
-                    download
-                            ? ContentDisposition.attachment()
-                            : ContentDisposition.inline()
-            )
-                    .filename(
-                            document.getOriginalName(),
-                            StandardCharsets.UTF_8
-                    )
-                    .build();
-
-            return ResponseEntity.ok()
-                    .contentType(
-                            MediaType.parseMediaType(document.getMimeType())
-                    )
-                    .header(
-                            HttpHeaders.CONTENT_DISPOSITION,
-                            disposition.toString()
-                    )
-                    .header(HttpHeaders.CACHE_CONTROL, "no-store")
-                    .header("X-Content-Type-Options", "nosniff")
-                    .body(fileContent);
-
-        } catch (IOException exception) {
-            throw new ResponseStatusException(
-                    HttpStatus.INTERNAL_SERVER_ERROR,
-                    "Không thể đọc nội dung tài liệu",
-                    exception
-            );
-        }
-    }
-
-    // Kiểm tra file rỗng và dung lượng.
-    private void validateSize(MultipartFile file) {
-        if (file == null || file.isEmpty()) {
-            throw new ResponseStatusException(
-                    HttpStatus.BAD_REQUEST,
-                    "Vui lòng chọn file có dữ liệu"
-            );
-        }
-
-        if (file.getSize() > MAX_FILE_SIZE) {
-            throw new ResponseStatusException(
-                    HttpStatus.PAYLOAD_TOO_LARGE,
-                    "Dung lượng file không được vượt quá 10 MB"
-            );
-        }
-    }
-
-    // Lấy tên file upload, bỏ đường dẫn nếu có.
-    private String originalName(MultipartFile file) {
-        String name = file.getOriginalFilename();
-
-        if (name == null || name.isBlank()) {
-            throw new ResponseStatusException(
-                    HttpStatus.BAD_REQUEST,
-                    "Tên file không hợp lệ"
-            );
-        }
-
-        name = name.replace('\\', '/');
-        name = name.substring(name.lastIndexOf('/') + 1);
-
-        if (name.isBlank()
-                || name.length() > 255
-                || name.chars().anyMatch(Character::isISOControl)) {
-            throw new ResponseStatusException(
-                    HttpStatus.BAD_REQUEST,
-                    "Tên file không hợp lệ hoặc dài quá 255 ký tự"
-            );
-        }
-
-        return name;
-    }
-
-    // Lấy và kiểm tra phần mở rộng.
-    private String extension(String name) {
-        int dotIndex = name.lastIndexOf('.');
-
-        if (dotIndex <= 0 || dotIndex == name.length() - 1) {
-            throw new ResponseStatusException(
-                    HttpStatus.BAD_REQUEST,
-                    "File phải có phần mở rộng"
-            );
-        }
-
-        String extension = name.substring(dotIndex + 1)
-                .toLowerCase(Locale.ROOT);
-
-        if (!ALLOWED_TYPES.containsKey(extension)) {
-            throw new ResponseStatusException(
-                    HttpStatus.UNSUPPORTED_MEDIA_TYPE,
-                    "Chỉ hỗ trợ PDF, DOC, DOCX, JPG, JPEG và PNG"
-            );
-        }
-
-        return extension;
+        return ResponseEntity.ok()
+                .contentType(
+                        MediaType.parseMediaType(document.getMimeType())
+                )
+                .header(
+                        HttpHeaders.CONTENT_DISPOSITION,
+                        disposition.toString()
+                )
+                .header(HttpHeaders.CACHE_CONTROL, "no-store")
+                .header("X-Content-Type-Options", "nosniff")
+                .body(fileContent);
     }
 
     // Chuyển entity thành DTO trả về frontend.
@@ -544,21 +464,5 @@ public class DocumentService {
         document.setIssuer(request.getIssuer());
         document.setKeywords(request.getKeywords());
         document.setDescription(request.getDescription());
-    }
-
-    // Dọn file nếu upload thất bại.
-    private void removeFailedUpload(
-            Path path,
-            Exception originalError
-    ) {
-        if (path == null) {
-            return;
-        }
-
-        try {
-            Files.deleteIfExists(path);
-        } catch (IOException cleanupError) {
-            originalError.addSuppressed(cleanupError);
-        }
     }
 }

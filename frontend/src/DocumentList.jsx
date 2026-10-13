@@ -4,16 +4,10 @@ import DocumentMetadataForm, {
     emptyMetadata,
 } from './DocumentMetadataForm.jsx';
 
-function displayDate(value) {
-    if (!value) return '—';
-
-    const [year, month, day] = value.split('-');
-    return `${day}/${month}/${year}`;
-}
-
 export default function DocumentList({
                                          folderId,
                                          reload,
+                                         selectedDocumentId,
                                          disabled = false,
                                          onBusyChange,
                                          onOpenDocument,
@@ -21,6 +15,7 @@ export default function DocumentList({
                                          onRenameDocument,
                                          onMoveDocument,
                                          onDeleteDocument,
+                                         onPermanentDeleteDocument,
                                          onDownloadDocument,
                                          onDocumentsChanged,
                                      }) {
@@ -36,7 +31,7 @@ export default function DocumentList({
 
     const saveLock = useRef(false);
 
-    // Lấy lại danh sách khi đổi thư mục hoặc reload thay đổi.
+    // Lấy danh sách khi đổi thư mục hoặc reload thay đổi.
     useEffect(() => {
         let active = true;
 
@@ -86,6 +81,10 @@ export default function DocumentList({
 
     // Mở form sửa metadata.
     function startEdit(document) {
+        if (disabled || saving || saveLock.current) {
+            return;
+        }
+
         setSaveError('');
         setSuccess('');
         setEditingDocument(document);
@@ -170,6 +169,7 @@ export default function DocumentList({
                 </p>
             )}
 
+            {/* Metadata chỉ hiện trong form khi bấm Sửa thông tin. */}
             {editingDocument && (
                 <form
                     className="folders-form"
@@ -223,8 +223,28 @@ export default function DocumentList({
                             <li
                                 key={document.id}
                                 className="folders-item"
+                                style={{
+                                    padding: '10px 12px',
+                                    gap: '12px',
+                                    flexWrap: 'wrap',
+                                    background:
+                                        selectedDocumentId === document.id
+                                            ? '#eff6ff'
+                                            : undefined,
+                                    outline:
+                                        selectedDocumentId === document.id
+                                            ? '1px solid #93c5fd'
+                                            : undefined,
+                                }}
                             >
-                                <div className="folders-info">
+                                {/* Chỉ hiện tên và loại file. */}
+                                <div
+                                    className="folders-info"
+                                    style={{
+                                        flex: '1 1 180px',
+                                        minWidth: 0,
+                                    }}
+                                >
                                     <span
                                         className="folders-icon"
                                         aria-hidden="true"
@@ -232,69 +252,40 @@ export default function DocumentList({
                                         📄
                                     </span>
 
-                                    <div
-                                        style={{
-                                            minWidth: 0,
-                                            overflowWrap: 'anywhere',
-                                        }}
-                                    >
-                                        <strong>
-                                            {document.title ||
-                                                document.originalName}
+                                    <div style={{ minWidth: 0 }}>
+                                        <strong
+                                            title={
+                                                document.originalName ||
+                                                document.title
+                                            }
+                                            style={{
+                                                display: 'block',
+                                                overflow: 'hidden',
+                                                textOverflow: 'ellipsis',
+                                                whiteSpace: 'nowrap',
+                                            }}
+                                        >
+                                            {document.originalName ||
+                                                document.title}
                                         </strong>
 
-                                        <p>
-                                            File: {document.originalName}
-                                        </p>
-
-                                        <p>
-                                            Số hiệu:{' '}
-                                            {document.documentNumber || '—'}
-                                        </p>
-
-                                        <p>
-                                            Loại văn bản:{' '}
-                                            {document.documentType || '—'}
-                                        </p>
-
-                                        <p>
-                                            Ngày ban hành:{' '}
-                                            {displayDate(document.issuedDate)}
-                                        </p>
-
-                                        <p>
-                                            Đơn vị/người ban hành:{' '}
-                                            {document.issuer || '—'}
-                                        </p>
-
-                                        <p>
-                                            Từ khóa:{' '}
-                                            {document.keywords || '—'}
-                                        </p>
-
-                                        <p style={{ whiteSpace: 'pre-wrap' }}>
-                                            Mô tả:{' '}
-                                            {document.description || '—'}
-                                        </p>
-
-                                        <p>
-                                            Kích thước:{' '}
-                                            {(document.size / 1024).toFixed(1)}
-                                            {' '}KB
-                                        </p>
-
-                                        <p>
-                                            Tải lên:{' '}
-                                            {document.uploadedAt
-                                                ? new Date(
-                                                    document.uploadedAt
-                                                ).toLocaleString('vi-VN')
-                                                : '—'}
-                                        </p>
+                                        <small style={{ color: '#64748b' }}>
+                                            {document.originalName
+                                                ?.split('.')
+                                                .pop()
+                                                ?.toUpperCase() || 'FILE'}
+                                        </small>
                                     </div>
                                 </div>
 
-                                <div className="folders-actions">
+                                <div
+                                    className="folders-actions"
+                                    style={{
+                                        display: 'flex',
+                                        flexWrap: 'wrap',
+                                        gap: '6px',
+                                    }}
+                                >
                                     <button
                                         type="button"
                                         disabled={
@@ -380,7 +371,25 @@ export default function DocumentList({
                                             onDeleteDocument(folderId, document)
                                         }
                                     >
-                                        Xóa
+                                        Xóa mềm
+                                    </button>
+
+                                    <button
+                                        type="button"
+                                        className="folders-danger"
+                                        disabled={
+                                            disabled ||
+                                            saving ||
+                                            !onPermanentDeleteDocument
+                                        }
+                                        onClick={() =>
+                                            onPermanentDeleteDocument(
+                                                folderId,
+                                                document
+                                            )
+                                        }
+                                    >
+                                        Xóa vĩnh viễn
                                     </button>
 
                                     <button

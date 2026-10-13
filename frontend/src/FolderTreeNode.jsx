@@ -11,6 +11,10 @@ export default function FolderTreeNode({ folder, interaction }) {
 
     const documentsReload = interaction.documentsReload;
 
+    const documentDisabled = Boolean(
+        interaction.documentDisabled ?? interaction.disabled
+    );
+
     useEffect(() => {
         if (!expanded) {
             return;
@@ -65,6 +69,28 @@ export default function FolderTreeNode({ folder, interaction }) {
 
         setExpanded(true);
         interaction.onOpen(folder);
+    }
+
+    // Bấm một lần: hiện danh sách bên phải và chọn tài liệu.
+    function selectDocument(event, document) {
+        event.stopPropagation();
+
+        if (documentDisabled) {
+            return;
+        }
+
+        interaction.onSelectDocument(folder.id, document);
+    }
+
+    // Bấm đúp: mở khung xem nội dung tài liệu.
+    function openDocument(event, document) {
+        event.stopPropagation();
+
+        if (documentDisabled) {
+            return;
+        }
+
+        interaction.onOpenDocument(folder.id, document);
     }
 
     const isDragging = interaction.draggedFolderId === folder.id;
@@ -163,18 +189,22 @@ export default function FolderTreeNode({ folder, interaction }) {
                                 />
                             ))}
 
-                            {/* Bấm tên tài liệu để mở khung xem. */}
+                            {/* Bấm một lần chọn, bấm đúp xem. */}
                             {documents.map((document) => (
                                 <button
                                     key={document.id}
                                     type="button"
                                     title={document.originalName}
-                                    disabled={interaction.disabled}
-                                    onClick={() =>
-                                        interaction.onOpenDocument(
-                                            folder.id,
-                                            document
-                                        )
+                                    disabled={documentDisabled}
+                                    onClick={(event) =>
+                                        selectDocument(event, document)
+                                    }
+                                    onDoubleClick={(event) =>
+                                        openDocument(event, document)
+                                    }
+                                    aria-pressed={
+                                        interaction.selectedDocumentId ===
+                                        document.id
                                     }
                                     style={{
                                         display: 'block',
@@ -182,7 +212,20 @@ export default function FolderTreeNode({ folder, interaction }) {
                                         padding: '6px 4px',
                                         marginBottom: '4px',
                                         textAlign: 'left',
-                                        overflowWrap: 'anywhere',
+                                        overflow: 'hidden',
+                                        textOverflow: 'ellipsis',
+                                        whiteSpace: 'nowrap',
+                                        borderRadius: '6px',
+                                        background:
+                                            interaction.selectedDocumentId ===
+                                            document.id
+                                                ? '#dbeafe'
+                                                : 'transparent',
+                                        fontWeight:
+                                            interaction.selectedDocumentId ===
+                                            document.id
+                                                ? 'bold'
+                                                : 'normal',
                                     }}
                                 >
                                     📄{' '}

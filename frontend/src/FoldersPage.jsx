@@ -34,6 +34,8 @@ export default function FoldersPage({ onLogout }) {
     const [uploadSuccess, setUploadSuccess] = useState('');
 
     const [preview, setPreview] = useState(null);
+    const [selectedDocumentId, setSelectedDocumentId] = useState(null);
+    const documentSelectionVersion = useRef(0);
 
     // Form/thông tin tài liệu đang mở.
     const [documentAction, setDocumentAction] = useState(null);
@@ -189,6 +191,7 @@ export default function FoldersPage({ onLogout }) {
     }
 
     async function openFolder(folder) {
+        clearDocumentSelection();
         clearMessages();
         setBusy(true);
 
@@ -210,6 +213,7 @@ export default function FoldersPage({ onLogout }) {
             return;
         }
 
+        clearDocumentSelection();
         clearMessages();
         setBusy(true);
 
@@ -240,9 +244,75 @@ export default function FoldersPage({ onLogout }) {
         }
     }
 
-    // Xem nội dung PDF/ảnh.
+    // Bấm một lần trên cây: chọn tài liệu và hiện thư mục chứa nó.
+    // Không bật busy khi lấy đường dẫn để lần bấm thứ hai vẫn được nhận.
+    async function selectDocumentFromTree(folderId, document) {
+        if (
+            busy ||
+            showForm ||
+            documentAction ||
+            documentLock.current ||
+            moveLock.current
+        ) {
+            return;
+        }
+
+        const version = ++documentSelectionVersion.current;
+
+        setSelectedDocumentId(document.id);
+        clearMessages();
+
+        if (parentId === folderId) {
+            return;
+        }
+
+        try {
+            const nextPath = [];
+            const visited = new Set();
+            let id = folderId;
+
+            while (id != null) {
+                if (visited.has(id)) {
+                    throw new Error('Cấu trúc thư mục bị vòng lặp.');
+                }
+
+                visited.add(id);
+
+                const folder = await api.getFolder(id);
+
+                // Bỏ kết quả nếu người dùng đã chọn mục khác.
+                if (version !== documentSelectionVersion.current) {
+                    return;
+                }
+
+                nextPath.unshift(folder);
+                id = folder.parentId ?? null;
+            }
+
+            closeForm();
+            setPath(nextPath);
+        } catch (err) {
+            if (version === documentSelectionVersion.current) {
+                setError(err.message);
+            }
+        }
+    }
+
+    // Hủy lựa chọn và các yêu cầu lấy đường dẫn cũ khi đổi thư mục.
+    function clearDocumentSelection() {
+        documentSelectionVersion.current += 1;
+        setSelectedDocumentId(null);
+    }
+
+    // Bấm đúp trên cây hoặc bấm nút Xem: mở nội dung PDF/ảnh.
     async function openDocument(folderId, document) {
-        if (actionDisabled || moveLock.current) {
+        if (
+            busy ||
+            showForm ||
+            documentAction ||
+            documentLock.current ||
+            moveLock.current
+        ) {
             return;
         }
 
@@ -460,11 +530,15 @@ export default function FoldersPage({ onLogout }) {
             setPreview(null);
             refreshDocuments();
 
+            setSelectedDocumentId((previous) =>
+                previous === action.document.id ? null : previous
+            );
+
             setSuccess('Đã chuyển tài liệu sang thư mục đích.');
         });
     }
 
-    // Nút Xóa.
+    // Nút Xóa mềm.
     async function deleteDocument(folderId, document) {
         if (actionDisabled || documentLock.current) {
             return;
@@ -483,7 +557,53 @@ export default function FoldersPage({ onLogout }) {
 
             setPreview(null);
             refreshDocuments();
+
+            setSelectedDocumentId((previous) =>
+                previous === document.id ? null : previous
+            );
+
             setSuccess('Đã xóa mềm tài liệu.');
+        });
+    }
+
+    // Nút Xóa vĩnh viễn.
+    async function permanentDeleteDocument(folderId, document) {
+        if (
+            actionDisabled ||
+            documentLock.current ||
+            moveLock.current
+        ) {
+            return;
+        }
+
+        if (
+            !window.confirm(
+                `Xóa vĩnh viễn "${document.originalName}"?\n` +
+                'Bản ghi và file sẽ bị xóa, không thể khôi phục bằng ứng dụng.'
+            )
+        ) {
+            return;
+        }
+
+        await runDocumentAction(async () => {
+            try {
+                await api.permanentDeleteDocument(
+                    folderId,
+                    document.id
+                );
+            } finally {
+                // Server có thể đã xóa bản ghi nhưng gặp lỗi dọn file.
+                // Luôn tải lại danh sách để giao diện phản ánh dữ liệu mới.
+                setPreview(null);
+
+                setSelectedDocumentId((previous) =>
+                    previous === document.id ? null : previous
+                );
+
+                refreshDocuments();
+            }
+
+            setSuccess('Đã xóa vĩnh viễn tài liệu.');
         });
     }
 
@@ -530,6 +650,7 @@ export default function FoldersPage({ onLogout }) {
     }
 
     function goBack() {
+        clearDocumentSelection();
         clearMessages();
         closeForm();
         setPath((previous) => previous.slice(0, -1));
@@ -731,6 +852,7 @@ export default function FoldersPage({ onLogout }) {
                 `Đã chuyển "${source.name}" vào ${destination}.`
             );
 
+            clearDocumentSelection();
             setPath([]);
             setReload((value) => value + 1);
         } catch (err) {
@@ -748,7 +870,12 @@ export default function FoldersPage({ onLogout }) {
         dropTarget,
 
         selectedFolderId: parentId,
+        selectedDocumentId,
+        documentDisabled:
+            busy || showForm || Boolean(documentAction),
         documentsReload,
+
+        onSelectDocument: selectDocumentFromTree,
         onOpen: openFolderFromTree,
         onOpenDocument: openDocument,
 
@@ -887,10 +1014,10 @@ export default function FoldersPage({ onLogout }) {
                                     )}
                                 </form>
 
-                                {/* Truyền các hàm xử lý xuống danh sách. */}
                                 <DocumentList
                                     key={parentId}
                                     folderId={parentId}
+                                    selectedDocumentId={selectedDocumentId}
                                     reload={documentsReload}
                                     disabled={actionDisabled}
                                     onBusyChange={setBusy}
@@ -899,6 +1026,7 @@ export default function FoldersPage({ onLogout }) {
                                     onRenameDocument={startRenameDocument}
                                     onMoveDocument={startMoveDocument}
                                     onDeleteDocument={deleteDocument}
+                                    onPermanentDeleteDocument={permanentDeleteDocument}
                                     onDownloadDocument={downloadDocument}
                                     onDocumentsChanged={refreshDocuments}
                                 />
