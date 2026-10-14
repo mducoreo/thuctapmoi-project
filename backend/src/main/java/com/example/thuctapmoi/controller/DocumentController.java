@@ -13,6 +13,7 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.util.List;
+import java.util.Map;
 
 @RestController
 @RequestMapping("/folders/{folderId}/documents")
@@ -136,7 +137,7 @@ public class DocumentController {
         return ResponseEntity.noContent().build();
     }
 
-    // Xem nội dung: giữ API cũ.
+    // Xem nội dung file gốc.
     @GetMapping("/{documentId}/content")
     public ResponseEntity<byte[]> content(
             @PathVariable("folderId") Long folderId,
@@ -163,10 +164,12 @@ public class DocumentController {
                 authentication.getName()
         );
     }
+
+    // Xóa vĩnh viễn.
     @DeleteMapping("/{documentId}/permanent")
     public ResponseEntity<Void> permanentDelete(
-            @PathVariable Long folderId,
-            @PathVariable Long documentId,
+            @PathVariable("folderId") Long folderId,
+            @PathVariable("documentId") Long documentId,
             Authentication authentication
     ) {
         service.permanentDelete(
@@ -176,5 +179,43 @@ public class DocumentController {
         );
 
         return ResponseEntity.noContent().build();
+    }
+
+    // Chạy OCR, lưu text và trả về kết quả.
+    @PostMapping(
+            value = "/{documentId}/ocr",
+            produces = MediaType.APPLICATION_JSON_VALUE
+    )
+    public Map<String, String> runOcr(
+            @PathVariable("folderId") Long folderId,
+            @PathVariable("documentId") Long documentId,
+            Authentication authentication
+    ) {
+        String text = service.runOcr(
+                folderId,
+                documentId,
+                authentication.getName()
+        );
+
+        return Map.of("text", text);
+    }
+
+    // Lấy text đã lưu, không chạy lại OCR.
+    @GetMapping(
+            value = "/{documentId}/text",
+            produces = MediaType.APPLICATION_JSON_VALUE
+    )
+    public Map<String, String> getExtractedText(
+            @PathVariable("folderId") Long folderId,
+            @PathVariable("documentId") Long documentId,
+            Authentication authentication
+    ) {
+        String text = service.getExtractedText(
+                folderId,
+                documentId,
+                authentication.getName()
+        );
+
+        return Map.of("text", text);
     }
 }

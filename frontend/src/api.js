@@ -246,7 +246,25 @@ export const api = {
             true
         );
     },
+    // POST: chạy OCR và lưu nội dung chữ.
+    runOcr(folderId, documentId) {
+        return request(
+            `/folders/${folderId}/documents/${documentId}/ocr`,
+            undefined,
+            'POST',
+            true
+        );
+    },
 
+    // GET: lấy nội dung chữ đã lưu.
+    getExtractedText(folderId, documentId) {
+        return request(
+            `/folders/${folderId}/documents/${documentId}/text`,
+            undefined,
+            'GET',
+            true
+        );
+    },
     // GET: nội dung file để xem, giữ tên hàm đang dùng.
     documentContent(folderId, documentId) {
         return requestFile(

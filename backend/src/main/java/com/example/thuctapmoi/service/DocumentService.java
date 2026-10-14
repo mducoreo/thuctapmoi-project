@@ -36,19 +36,22 @@ public class DocumentService {
     private final UserRepository userRepository;
     private final FileStorageService fileStorageService;
     private final DocumentFileValidator fileValidator;
+    private final OcrService ocrService;
 
     public DocumentService(
             DocumentRepository documentRepository,
             FolderRepository folderRepository,
             UserRepository userRepository,
             FileStorageService fileStorageService,
-            DocumentFileValidator fileValidator
+            DocumentFileValidator fileValidator,
+            OcrService ocrService
     ) {
         this.documentRepository = documentRepository;
         this.folderRepository = folderRepository;
         this.userRepository = userRepository;
         this.fileStorageService = fileStorageService;
         this.fileValidator = fileValidator;
+        this.ocrService = ocrService;
     }
 
     // ===== CÁC METHOD CHÍNH =====
@@ -332,6 +335,56 @@ public class DocumentService {
         documentRepository.flush();
     }
 
+    // 11. Chạy OCR và lưu nội dung chữ vào database.
+    @Transactional
+    public String runOcr(
+            Long folderId,
+            Long documentId,
+            String username
+    ) {
+        User user = currentUser(username);
+        Document document = ownedDocument(folderId, documentId, user);
+
+        // Đọc dữ liệu file gốc đã lưu trên ổ đĩa.
+        byte[] fileContent = fileStorageService.read(
+                document.getStoredName()
+        );
+
+        // Gọi OcrService đọc chữ từ dữ liệu file.
+        String text = ocrService.extractText(
+                fileContent,
+                document.getMimeType()
+        );
+
+        if (text.isBlank()) {
+            throw new ResponseStatusException(
+                    HttpStatus.UNPROCESSABLE_ENTITY,
+                    "Không nhận diện được chữ trong tài liệu"
+            );
+        }
+
+        // Chỉ lưu kết quả sau khi OCR thành công và có chữ.
+        document.setExtractedText(text);
+        documentRepository.saveAndFlush(document);
+
+        return text;
+    }
+
+    // 12. Lấy nội dung chữ đã lưu, không chạy lại OCR.
+    @Transactional(readOnly = true)
+    public String getExtractedText(
+            Long folderId,
+            Long documentId,
+            String username
+    ) {
+        User user = currentUser(username);
+        Document document = ownedDocument(folderId, documentId, user);
+
+        String text = document.getExtractedText();
+
+        return text == null ? "" : text;
+    }
+
     // ===== CÁC METHOD PHỤ =====
 
     // Tìm người đang đăng nhập.
@@ -362,7 +415,7 @@ public class DocumentService {
     }
 
     // Kiểm tra chung cho chi tiết, metadata, đổi tên,
-    // di chuyển, xóa, xem và tải xuống.
+    // di chuyển, xóa, xem, tải xuống và OCR.
     private Document ownedDocument(
             Long folderId,
             Long documentId,

@@ -50,8 +50,6 @@ public class Document {
     @Column(nullable = false)
     private LocalDateTime uploadedAt;
 
-    // ===== 7 trường metadata thêm mới =====
-
     // Tên văn bản
     @Nationalized
     @Column(length = 255)
@@ -85,7 +83,12 @@ public class Document {
     @Column(length = 2000)
     private String description;
 
-    // Có giá trị nghĩa là tài liệu đã bị xóa mềm.
+    // Nội dung chữ lấy được từ tài liệu bằng OCR
+    @Nationalized
+    @Column(name = "extracted_text", columnDefinition = "nvarchar(max)")
+    private String extractedText;
+
+    // Có giá trị nghĩa là tài liệu đã bị xóa mềm
     private LocalDateTime deletedAt;
 
     public Document() {

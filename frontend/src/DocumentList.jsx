@@ -17,6 +17,8 @@ export default function DocumentList({
                                          onDeleteDocument,
                                          onPermanentDeleteDocument,
                                          onDownloadDocument,
+                                         onRunDocumentOcr,
+                                         onShowDocumentText,
                                          onDocumentsChanged,
                                      }) {
     const [documents, setDocuments] = useState([]);
@@ -78,6 +80,17 @@ export default function DocumentList({
             active = false;
         };
     }, [folderId, reload]);
+
+    // Kiểm tra tài liệu có phải ảnh hoặc PDF để hiện nút OCR.
+    function canRunOcr(document) {
+        return (
+            document.mimeType?.startsWith('image/') ||
+            document.mimeType === 'application/pdf' ||
+            /\.(pdf|png|jpe?g|bmp|tiff?|webp)$/i.test(
+                document.originalName ?? ''
+            )
+        );
+    }
 
     // Mở form sửa metadata.
     function startEdit(document) {
@@ -298,6 +311,42 @@ export default function DocumentList({
                                         }
                                     >
                                         Xem
+                                    </button>
+
+                                    {canRunOcr(document) && (
+                                        <button
+                                            type="button"
+                                            disabled={
+                                                disabled ||
+                                                saving ||
+                                                !onRunDocumentOcr
+                                            }
+                                            onClick={() =>
+                                                onRunDocumentOcr(
+                                                    folderId,
+                                                    document
+                                                )
+                                            }
+                                        >
+                                            Nhận dạng chữ
+                                        </button>
+                                    )}
+
+                                    <button
+                                        type="button"
+                                        disabled={
+                                            disabled ||
+                                            saving ||
+                                            !onShowDocumentText
+                                        }
+                                        onClick={() =>
+                                            onShowDocumentText(
+                                                folderId,
+                                                document
+                                            )
+                                        }
+                                    >
+                                        Xem chữ
                                     </button>
 
                                     <button

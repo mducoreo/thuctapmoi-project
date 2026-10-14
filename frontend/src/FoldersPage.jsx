@@ -43,6 +43,11 @@ export default function FoldersPage({ onLogout }) {
     const [destinationFolders, setDestinationFolders] = useState([]);
     const [targetFolderId, setTargetFolderId] = useState('');
 
+    // Nội dung và trạng thái OCR.
+    const [ocrText, setOcrText] = useState('');
+    const [ocrLoading, setOcrLoading] = useState(false);
+    const [ocrError, setOcrError] = useState('');
+
     const documentLock = useRef(false);
     const fileInputRef = useRef(null);
     const moveLock = useRef(false);
@@ -372,6 +377,85 @@ export default function FoldersPage({ onLogout }) {
         }
     }
 
+    // Hàm phụ: chạy OCR hoặc lấy chữ đã lưu cho khung đang mở.
+    async function loadDocumentText(folderId, document, run) {
+        await runDocumentAction(async () => {
+            setOcrText('');
+            setOcrError('');
+            setOcrLoading(true);
+
+            setDocumentAction({
+                type: 'ocr',
+                mode: run ? 'run' : 'view',
+                folderId,
+                document,
+            });
+
+            try {
+                const data = run
+                    ? await api.runOcr(folderId, document.id)
+                    : await api.getExtractedText(folderId, document.id);
+
+                setOcrText(data?.text ?? '');
+            } catch (err) {
+                setOcrError(err.message);
+            } finally {
+                setOcrLoading(false);
+            }
+        });
+    }
+
+    // Nút Nhận dạng chữ trong DocumentList.
+    async function runDocumentOcr(folderId, document) {
+        if (actionDisabled || documentLock.current) return;
+
+        await loadDocumentText(folderId, document, true);
+    }
+
+    // Nút Xem chữ: chỉ lấy kết quả đã lưu.
+    async function showDocumentText(folderId, document) {
+        if (actionDisabled || documentLock.current) return;
+
+        await loadDocumentText(folderId, document, false);
+    }
+
+    // Nút Thử lại trong khung chữ.
+    async function retryDocumentText() {
+        if (documentAction?.type !== 'ocr') return;
+
+        const action = documentAction;
+
+        await loadDocumentText(
+            action.folderId,
+            action.document,
+            action.mode === 'run'
+        );
+    }
+
+    // Nút Nhận dạng lại trong khung chữ.
+    async function rerunDocumentOcr() {
+        if (documentAction?.type !== 'ocr') return;
+
+        const action = documentAction;
+
+        await loadDocumentText(
+            action.folderId,
+            action.document,
+            true
+        );
+    }
+
+    // Kiểm tra tài liệu có phải ảnh hoặc PDF.
+    function canRunOcr(document) {
+        return (
+            document.mimeType?.startsWith('image/') ||
+            document.mimeType === 'application/pdf' ||
+            /\.(pdf|png|jpe?g|bmp|tiff?|webp)$/i.test(
+                document.originalName ?? ''
+            )
+        );
+    }
+
     // Nút Chi tiết.
     async function showDocumentDetail(folderId, document) {
         if (actionDisabled) return;
@@ -448,7 +532,6 @@ export default function FoldersPage({ onLogout }) {
 
         for (let index = 0; index < queue.length; index += 1) {
             const item = queue[index];
-
             const children = await api.folders(item.parentId);
 
             if (!Array.isArray(children)) {
@@ -592,8 +675,7 @@ export default function FoldersPage({ onLogout }) {
                     document.id
                 );
             } finally {
-                // Server có thể đã xóa bản ghi nhưng gặp lỗi dọn file.
-                // Luôn tải lại danh sách để giao diện phản ánh dữ liệu mới.
+                // Luôn tải lại danh sách sau yêu cầu xóa.
                 setPreview(null);
 
                 setSelectedDocumentId((previous) =>
@@ -646,6 +728,8 @@ export default function FoldersPage({ onLogout }) {
         }
 
         setDocumentAction(null);
+        setOcrText('');
+        setOcrError('');
         setError('');
     }
 
@@ -986,9 +1070,7 @@ export default function FoldersPage({ onLogout }) {
                                     <button
                                         type="submit"
                                         className="folders-primary"
-                                        disabled={
-                                            actionDisabled || !file
-                                        }
+                                        disabled={actionDisabled || !file}
                                     >
                                         {uploadLock.current
                                             ? 'Đang tải lên...'
@@ -1026,8 +1108,12 @@ export default function FoldersPage({ onLogout }) {
                                     onRenameDocument={startRenameDocument}
                                     onMoveDocument={startMoveDocument}
                                     onDeleteDocument={deleteDocument}
-                                    onPermanentDeleteDocument={permanentDeleteDocument}
+                                    onPermanentDeleteDocument={
+                                        permanentDeleteDocument
+                                    }
                                     onDownloadDocument={downloadDocument}
+                                    onRunDocumentOcr={runDocumentOcr}
+                                    onShowDocumentText={showDocumentText}
                                     onDocumentsChanged={refreshDocuments}
                                 />
                             </>
@@ -1104,9 +1190,7 @@ export default function FoldersPage({ onLogout }) {
                             <p role="status">Đang xử lý...</p>
                         )}
 
-                        {loading && (
-                            <p>Đang tải thư mục...</p>
-                        )}
+                        {loading && <p>Đang tải thư mục...</p>}
 
                         {!loading && loadError && (
                             <>
@@ -1140,17 +1224,11 @@ export default function FoldersPage({ onLogout }) {
                                             className="folders-item"
                                             draggable={!actionDisabled}
                                             onDragStart={(event) =>
-                                                handleDragStart(
-                                                    event,
-                                                    folder
-                                                )
+                                                handleDragStart(event, folder)
                                             }
                                             onDragEnd={handleDragEnd}
                                             onDragOver={(event) =>
-                                                handleDragOver(
-                                                    event,
-                                                    folder
-                                                )
+                                                handleDragOver(event, folder)
                                             }
                                             onDragLeave={handleDragLeave}
                                             onDrop={(event) =>
@@ -1233,7 +1311,7 @@ export default function FoldersPage({ onLogout }) {
                 </div>
             </div>
 
-            {/* Khung Chi tiết / Đổi tên / Di chuyển tài liệu. */}
+            {/* Khung Chi tiết / Đổi tên / Di chuyển / OCR. */}
             {documentAction && (
                 <div
                     style={{
@@ -1271,7 +1349,9 @@ export default function FoldersPage({ onLogout }) {
                                 ? 'Chi tiết tài liệu'
                                 : documentAction.type === 'rename'
                                     ? 'Đổi tên file'
-                                    : 'Di chuyển tài liệu'}
+                                    : documentAction.type === 'ocr'
+                                        ? 'Nội dung chữ của tài liệu'
+                                        : 'Di chuyển tài liệu'}
                         </h2>
 
                         {documentAction.type === 'detail' && (
@@ -1354,6 +1434,89 @@ export default function FoldersPage({ onLogout }) {
                                     </div>
                                 ))}
                             </dl>
+                        )}
+
+                        {documentAction.type === 'ocr' && (
+                            <div>
+                                <p>
+                                    File: {documentAction.document.originalName}
+                                </p>
+
+                                {ocrLoading && (
+                                    <p role="status">
+                                        {documentAction.mode === 'run'
+                                            ? 'Đang nhận dạng chữ, vui lòng chờ...'
+                                            : 'Đang lấy nội dung chữ...'}
+                                    </p>
+                                )}
+
+                                {ocrError && (
+                                    <div>
+                                        <p
+                                            className="message error"
+                                            role="alert"
+                                        >
+                                            {ocrError}
+                                        </p>
+
+                                        <button
+                                            type="button"
+                                            disabled={busy || ocrLoading}
+                                            onClick={retryDocumentText}
+                                        >
+                                            Thử lại
+                                        </button>
+                                    </div>
+                                )}
+
+                                {!ocrLoading && !ocrError && (
+                                    ocrText.trim() ? (
+                                        <>
+                                            <label htmlFor="document-ocr-text">
+                                                Nội dung văn bản
+                                            </label>
+
+                                            <textarea
+                                                id="document-ocr-text"
+                                                readOnly
+                                                value={ocrText}
+                                                style={{
+                                                    width: '100%',
+                                                    minHeight: '320px',
+                                                    boxSizing: 'border-box',
+                                                    margin: '12px 0',
+                                                    padding: '12px',
+                                                    resize: 'vertical',
+                                                    lineHeight: 1.6,
+                                                }}
+                                            />
+                                        </>
+                                    ) : (
+                                        <p role="status">
+                                            {documentAction.mode === 'run'
+                                                ? 'Đã xử lý nhưng không nhận diện được chữ trong file.'
+                                                : 'Chưa có nội dung chữ được lưu. Với ảnh hoặc PDF, bấm Nhận dạng chữ để lấy nội dung.'}
+                                        </p>
+                                    )
+                                )}
+
+                                {canRunOcr(documentAction.document) && (
+                                    <button
+                                        type="button"
+                                        className="folders-primary"
+                                        disabled={busy || ocrLoading}
+                                        onClick={rerunDocumentOcr}
+                                        style={{ margin: '12px 0' }}
+                                    >
+                                        {ocrLoading &&
+                                        documentAction.mode === 'run'
+                                            ? 'Đang nhận dạng...'
+                                            : ocrText.trim()
+                                                ? 'Nhận dạng lại'
+                                                : 'Nhận dạng chữ'}
+                                    </button>
+                                )}
+                            </div>
                         )}
 
                         {documentAction.type === 'rename' && (
@@ -1462,11 +1625,13 @@ export default function FoldersPage({ onLogout }) {
 
                         <button
                             type="button"
-                            autoFocus={documentAction.type === 'detail'}
+                            autoFocus={
+                                ['detail', 'ocr'].includes(documentAction.type)
+                            }
                             disabled={busy}
                             onClick={closeDocumentAction}
                         >
-                            {documentAction.type === 'detail'
+                            {['detail', 'ocr'].includes(documentAction.type)
                                 ? 'Đóng'
                                 : 'Hủy'}
                         </button>
