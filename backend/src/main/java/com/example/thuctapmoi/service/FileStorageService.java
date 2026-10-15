@@ -23,6 +23,23 @@ public class FileStorageService {
                 .normalize();
     }
 
+    // Tạo thư mục thật trên ổ đĩa ngay khi tạo folder trên ứng dụng.
+    public Path createFolder(Long folderId) {
+        Path folderPath = uploadDir.resolve("folder-" + folderId);
+
+        try {
+            Files.createDirectories(folderPath);
+            return folderPath;
+
+        } catch (IOException exception) {
+            throw new ResponseStatusException(
+                    HttpStatus.INTERNAL_SERVER_ERROR,
+                    "Không thể tạo thư mục trên ổ đĩa",
+                    exception
+            );
+        }
+    }
+
     // Lưu file; nếu ghi thất bại thì dọn file vừa tạo.
     public Path save(
             Long folderId,

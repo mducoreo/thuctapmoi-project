@@ -21,7 +21,8 @@ import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
-
+import com.example.thuctapmoi.entity.OcrStatus;
+import org.springframework.transaction.annotation.Propagation;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -37,6 +38,7 @@ public class DocumentService {
     private final FileStorageService fileStorageService;
     private final DocumentFileValidator fileValidator;
     private final OcrService ocrService;
+    private final DocumentOcrStatusService ocrStatusService;
 
     public DocumentService(
             DocumentRepository documentRepository,
@@ -44,7 +46,8 @@ public class DocumentService {
             UserRepository userRepository,
             FileStorageService fileStorageService,
             DocumentFileValidator fileValidator,
-            OcrService ocrService
+            OcrService ocrService,
+            DocumentOcrStatusService ocrStatusService
     ) {
         this.documentRepository = documentRepository;
         this.folderRepository = folderRepository;
@@ -52,6 +55,7 @@ public class DocumentService {
         this.fileStorageService = fileStorageService;
         this.fileValidator = fileValidator;
         this.ocrService = ocrService;
+        this.ocrStatusService = ocrStatusService;
     }
 
     // ===== CÁC METHOD CHÍNH =====
@@ -96,6 +100,8 @@ public class DocumentService {
             document.setFolder(folder);
             document.setOwner(user);
             document.setUploadedAt(LocalDateTime.now());
+            document.setOcrStatus(OcrStatus.PENDING);
+            document.setOcrError(null);
 
             applyMetadata(document, request);
 
@@ -335,8 +341,8 @@ public class DocumentService {
         documentRepository.flush();
     }
 
-    // 11. Chạy OCR và lưu nội dung chữ vào database.
-    @Transactional
+    // 11. Chạy OCR, lưu trạng thái, kết quả hoặc lỗi.
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public String runOcr(
             Long folderId,
             Long documentId,
@@ -345,27 +351,62 @@ public class DocumentService {
         User user = currentUser(username);
         Document document = ownedDocument(folderId, documentId, user);
 
-        // Đọc dữ liệu file gốc đã lưu trên ổ đĩa.
-        byte[] fileContent = fileStorageService.read(
-                document.getStoredName()
-        );
+        // Lấy thông tin cần dùng trước khi cập nhật trạng thái.
+        String storedName = document.getStoredName();
+        String mimeType = document.getMimeType();
 
-        // Gọi OcrService đọc chữ từ dữ liệu file.
-        String text = ocrService.extractText(
-                fileContent,
-                document.getMimeType()
-        );
+        // Đặt ngoài try để yêu cầu chạy trùng không làm đổi thành FAILED.
+        ocrStatusService.start(documentId);
 
-        if (text.isBlank()) {
+        String text;
+
+        try {
+            byte[] fileContent = fileStorageService.read(storedName);
+
+            text = ocrService.extractText(fileContent, mimeType);
+
+            if (text == null || text.isBlank()) {
+                throw new ResponseStatusException(
+                        HttpStatus.UNPROCESSABLE_ENTITY,
+                        "Không nhận diện được chữ trong tài liệu"
+                );
+            }
+
+        } catch (Exception exception) {
+            String errorMessage = "Không thể xử lý OCR cho tài liệu";
+
+            if (exception instanceof ResponseStatusException responseException) {
+                String reason = responseException.getReason();
+
+                if (reason != null && !reason.isBlank()) {
+                    errorMessage = reason;
+                }
+            }
+
+            org.slf4j.LoggerFactory
+                    .getLogger(DocumentService.class)
+                    .error(
+                            "OCR thất bại cho tài liệu {}",
+                            documentId,
+                            exception
+                    );
+
+            // Commit FAILED và lỗi trước khi ném exception ra ngoài.
+            ocrStatusService.fail(documentId, errorMessage);
+
+            if (exception instanceof ResponseStatusException responseException) {
+                throw responseException;
+            }
+
             throw new ResponseStatusException(
-                    HttpStatus.UNPROCESSABLE_ENTITY,
-                    "Không nhận diện được chữ trong tài liệu"
+                    HttpStatus.INTERNAL_SERVER_ERROR,
+                    errorMessage,
+                    exception
             );
         }
 
-        // Chỉ lưu kết quả sau khi OCR thành công và có chữ.
-        document.setExtractedText(text);
-        documentRepository.saveAndFlush(document);
+        // Lưu nội dung và COMPLETED sau khi nhận dạng thành công.
+        ocrStatusService.complete(documentId, text);
 
         return text;
     }
@@ -501,7 +542,9 @@ public class DocumentService {
                 document.getIssuedDate(),
                 document.getIssuer(),
                 document.getKeywords(),
-                document.getDescription()
+                document.getDescription(),
+                document.getOcrStatus(),
+                document.getOcrError()
         );
     }
 

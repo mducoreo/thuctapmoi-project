@@ -18,16 +18,18 @@ import java.util.Objects;
 @Service
 @Transactional
 public class FolderService {
-
+    private final FileStorageService fileStorageService;
     private final FolderRepository repository;
     private final UserRepository userRepository;
 
     public FolderService(
             FolderRepository repository,
-            UserRepository userRepository
+            UserRepository userRepository,
+            FileStorageService fileStorageService
     ) {
         this.repository = repository;
         this.userRepository = userRepository;
+        this.fileStorageService = fileStorageService;
     }
 
     // Không có parentId: lấy folder gốc.
@@ -65,6 +67,7 @@ public class FolderService {
         User actor = currentUser(username);
 
         Folder parent = null;
+
         if (request.getParentId() != null) {
             parent = findFolder(request.getParentId());
             checkPermission(parent, actor);
@@ -78,7 +81,13 @@ public class FolderService {
         // Folder con cùng chủ sở hữu với folder cha.
         folder.setOwner(parent == null ? actor : parent.getOwner());
 
-        return toResponse(repository.save(folder));
+        // Lưu database để lấy ID của folder.
+        Folder saved = repository.saveAndFlush(folder);
+
+        // Tạo thư mục thật trên ổ đĩa theo ID vừa có.
+        fileStorageService.createFolder(saved.getId());
+
+        return toResponse(saved);
     }
 
     public FolderResponse update(

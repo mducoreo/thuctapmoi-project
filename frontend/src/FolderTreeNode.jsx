@@ -1,19 +1,43 @@
 import { useEffect, useState } from 'react';
 import { api } from './api.js';
+import FolderCreateForm from './FolderCreateForm.jsx';
 
-export default function FolderTreeNode({ folder, interaction }) {
+export default function FolderTreeNode({
+                                           folder,
+                                           interaction,
+                                           foldersReload = 0,
+                                       }) {
     const [expanded, setExpanded] = useState(false);
     const [children, setChildren] = useState([]);
     const [documents, setDocuments] = useState([]);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
     const [retry, setRetry] = useState(0);
+    const [showCreate, setShowCreate] = useState(false);
 
     const documentsReload = interaction.documentsReload;
+    const createRequest = interaction.createRequest;
 
     const documentDisabled = Boolean(
         interaction.documentDisabled ?? interaction.disabled
     );
+
+    // Mở các nhánh dẫn đến thư mục mà nút bên phải yêu cầu tạo.
+    useEffect(() => {
+        if (!createRequest) return;
+
+        const isTarget = createRequest.folderId === folder.id;
+
+        const isAncestor = createRequest.ancestorIds.includes(
+            folder.id
+        );
+
+        if (isTarget || isAncestor) {
+            setExpanded(true);
+        }
+
+        setShowCreate(isTarget);
+    }, [createRequest, folder.id]);
 
     useEffect(() => {
         if (!expanded) {
@@ -52,7 +76,13 @@ export default function FolderTreeNode({ folder, interaction }) {
         return () => {
             active = false;
         };
-    }, [expanded, folder.id, documentsReload, retry]);
+    }, [
+        expanded,
+        folder.id,
+        documentsReload,
+        foldersReload,
+        retry,
+    ]);
 
     function toggle() {
         if (interaction.disabled) {
@@ -71,7 +101,27 @@ export default function FolderTreeNode({ folder, interaction }) {
         interaction.onOpen(folder);
     }
 
-    // Bấm một lần: hiện danh sách bên phải và chọn tài liệu.
+    function startCreateChild(event) {
+        event.stopPropagation();
+
+        if (interaction.disabled) {
+            return;
+        }
+
+        interaction.onClearCreateRequest();
+        setExpanded(true);
+        setShowCreate(true);
+    }
+
+    function closeCreate() {
+        setShowCreate(false);
+        interaction.onClearCreateRequest();
+    }
+
+    async function createChild(name) {
+        await interaction.onCreateFolder(name, folder.id);
+    }
+
     function selectDocument(event, document) {
         event.stopPropagation();
 
@@ -82,7 +132,6 @@ export default function FolderTreeNode({ folder, interaction }) {
         interaction.onSelectDocument(folder.id, document);
     }
 
-    // Bấm đúp: mở khung xem nội dung tài liệu.
     function openDocument(event, document) {
         event.stopPropagation();
 
@@ -100,7 +149,11 @@ export default function FolderTreeNode({ folder, interaction }) {
     return (
         <div>
             <div
-                draggable={!interaction.disabled && !loading}
+                draggable={
+                    !interaction.disabled &&
+                    !loading &&
+                    !showCreate
+                }
                 onDragStart={(event) =>
                     interaction.onDragStart(event, folder)
                 }
@@ -155,10 +208,37 @@ export default function FolderTreeNode({ folder, interaction }) {
                 >
                     📁 {folder.name}
                 </button>
+
+                <button
+                    type="button"
+                    title={`Tạo thư mục con trong ${folder.name}`}
+                    aria-label={`Tạo thư mục con trong ${folder.name}`}
+                    disabled={interaction.disabled}
+                    onClick={startCreateChild}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onDragStart={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                    }}
+                    style={{
+                        marginLeft: 'auto',
+                        flexShrink: 0,
+                    }}
+                >
+                    +
+                </button>
             </div>
 
             {expanded && (
                 <div style={{ marginLeft: 24 }}>
+                    {showCreate && (
+                        <FolderCreateForm
+                            disabled={interaction.disabled}
+                            onCreate={createChild}
+                            onCancel={closeCreate}
+                        />
+                    )}
+
                     {loading && (
                         <p role="status">Đang tải...</p>
                     )}
@@ -179,17 +259,17 @@ export default function FolderTreeNode({ folder, interaction }) {
                         </div>
                     )}
 
-                    {!loading && !error && (
+                    {!error && (
                         <>
                             {children.map((child) => (
                                 <FolderTreeNode
                                     key={child.id}
                                     folder={child}
                                     interaction={interaction}
+                                    foldersReload={foldersReload}
                                 />
                             ))}
 
-                            {/* Bấm một lần chọn, bấm đúp xem. */}
                             {documents.map((document) => (
                                 <button
                                     key={document.id}
@@ -234,7 +314,9 @@ export default function FolderTreeNode({ folder, interaction }) {
                                 </button>
                             ))}
 
-                            {children.length === 0 &&
+                            {!loading &&
+                                !showCreate &&
+                                children.length === 0 &&
                                 documents.length === 0 && (
                                     <p>Thư mục trống.</p>
                                 )}

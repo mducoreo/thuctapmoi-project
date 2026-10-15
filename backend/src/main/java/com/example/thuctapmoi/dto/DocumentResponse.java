@@ -1,5 +1,6 @@
 package com.example.thuctapmoi.dto;
 
+import com.example.thuctapmoi.entity.OcrStatus;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
 
@@ -22,7 +23,7 @@ public class DocumentResponse {
 
     private LocalDateTime uploadedAt;
 
-    // Metadata văn bản
+    // Metadata văn bản.
     private String title;
 
     private String documentNumber;
@@ -36,4 +37,9 @@ public class DocumentResponse {
     private String keywords;
 
     private String description;
+
+    // Trạng thái OCR và lỗi của lần chạy gần nhất.
+    private OcrStatus ocrStatus;
+
+    private String ocrError;
 }

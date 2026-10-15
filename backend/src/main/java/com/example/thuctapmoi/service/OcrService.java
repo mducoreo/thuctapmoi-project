@@ -1,47 +1,41 @@
 package com.example.thuctapmoi.service;
 
+import ai.onnxruntime.OrtException;
 import org.apache.pdfbox.Loader;
-import java.io.ByteArrayOutputStream;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.rendering.ImageType;
 import org.apache.pdfbox.rendering.PDFRenderer;
-import org.apache.tika.exception.TikaException;
-import org.apache.tika.metadata.Metadata;
-import org.apache.tika.parser.ParseContext;
-import org.apache.tika.parser.ocr.TesseractOCRParser;
-import org.apache.tika.sax.BodyContentHandler;
-import org.springframework.beans.factory.annotation.Value;
+import org.apache.pdfbox.text.PDFTextStripper;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
-import org.xml.sax.SAXException;
 
 import javax.imageio.ImageIO;
+import java.awt.Rectangle;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
-import java.util.Map;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
 
 @Service
 public class OcrService {
 
-    private final String tesseractPath;
-    private final String tessdataPath;
-    private final String language;
+    private final OcrDetectionService detectionService;
+    private final OcrRecognitionService recognitionService;
 
     public OcrService(
-            @Value("${ocr.tesseract-path}") String tesseractPath,
-            @Value("${ocr.tessdata-path}") String tessdataPath,
-            @Value("${ocr.language:vie+eng}") String language
+            OcrDetectionService detectionService,
+            OcrRecognitionService recognitionService
     ) {
-        this.tesseractPath = tesseractPath;
-        this.tessdataPath = tessdataPath;
-        this.language = language;
+        this.detectionService = detectionService;
+        this.recognitionService = recognitionService;
     }
 
     // ===== METHOD CHÍNH =====
 
-    // Nhận dữ liệu file và trả về nội dung chữ đọc được.
+    // Nhận dữ liệu file và trả về nội dung văn bản.
     public String extractText(byte[] content, String mimeType) {
         if (!"application/pdf".equals(mimeType)
                 && !"image/jpeg".equals(mimeType)
@@ -52,16 +46,21 @@ public class OcrService {
             );
         }
 
-        try {
-            TesseractOCRParser parser = createParser();
+        if (content == null || content.length == 0) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Tài liệu không có dữ liệu"
+            );
+        }
 
+        try {
             if ("application/pdf".equals(mimeType)) {
-                return extractPdf(content, parser);
+                return extractPdf(content);
             }
 
-            return extractImage(content, parser);
+            return extractImage(content);
 
-        } catch (IOException | SAXException | TikaException exception) {
+        } catch (IOException | OrtException exception) {
             throw new ResponseStatusException(
                     HttpStatus.INTERNAL_SERVER_ERROR,
                     "Không thể đọc chữ từ tài liệu",
@@ -72,39 +71,10 @@ public class OcrService {
 
     // ===== CÁC METHOD PHỤ =====
 
-    // Chuẩn bị bộ OCR với đường dẫn và ngôn ngữ đã cấu hình.
-    private TesseractOCRParser createParser() throws TikaException {
-        TesseractOCRParser parser = new TesseractOCRParser();
+    // Đọc ảnh JPG/PNG rồi chạy nhận dạng chữ.
+    private String extractImage(byte[] content)
+            throws IOException, OrtException {
 
-        parser.setTesseractPath(tesseractPath);
-        parser.setTessdataPath(tessdataPath);
-        parser.setLanguage(language);
-        parser.setOutputType("txt");
-        parser.setPageSegMode("3");
-
-        // Giới hạn thời gian cho mỗi ảnh hoặc trang được OCR.
-        parser.setTimeout(120);
-
-        // Không yêu cầu cài thêm ImageMagick để xử lý ảnh.
-        parser.setEnableImagePreprocessing(false);
-
-        parser.initialize(Map.of());
-
-        if (!parser.hasTesseract()) {
-            throw new ResponseStatusException(
-                    HttpStatus.SERVICE_UNAVAILABLE,
-                    "Không tìm thấy Tesseract, hãy kiểm tra cấu hình OCR"
-            );
-        }
-
-        return parser;
-    }
-
-    // Đọc ảnh JPG/PNG từ dữ liệu file rồi đưa vào OCR.
-    private String extractImage(
-            byte[] content,
-            TesseractOCRParser parser
-    ) throws IOException, SAXException, TikaException {
         try (ByteArrayInputStream input =
                      new ByteArrayInputStream(content)) {
 
@@ -117,27 +87,39 @@ public class OcrService {
                 );
             }
 
-            return readText(image, parser);
+            return readText(image);
         }
     }
 
-    // Chuyển từng trang PDF thành ảnh rồi đọc chữ.
-    private String extractPdf(
-            byte[] content,
-            TesseractOCRParser parser
-    ) throws IOException, SAXException, TikaException {
+    // Lấy văn bản có sẵn; trang không có văn bản mới chạy OCR.
+    private String extractPdf(byte[] content)
+            throws IOException, OrtException {
+
         try (PDDocument pdf = Loader.loadPDF(content)) {
             PDFRenderer renderer = new PDFRenderer(pdf);
+
+            PDFTextStripper stripper = new PDFTextStripper();
+            stripper.setSortByPosition(true);
+
             StringBuilder result = new StringBuilder();
 
             for (int page = 0; page < pdf.getNumberOfPages(); page++) {
-                BufferedImage image = renderer.renderImageWithDPI(
-                        page,
-                        200,
-                        ImageType.GRAY
-                );
+                // PDFTextStripper đánh số trang từ 1.
+                stripper.setStartPage(page + 1);
+                stripper.setEndPage(page + 1);
 
-                String pageText = readText(image, parser);
+                String pageText = stripper.getText(pdf).trim();
+
+                // Trang scan không có lớp văn bản thì OCR từ ảnh.
+                if (pageText.isBlank()) {
+                    BufferedImage image = renderer.renderImageWithDPI(
+                            page,
+                            200,
+                            ImageType.RGB
+                    );
+
+                    pageText = readText(image);
+                }
 
                 if (page > 0) {
                     result.append("\n\n");
@@ -150,40 +132,92 @@ public class OcrService {
         }
     }
 
-    // Chuyển ảnh gốc thành dữ liệu PNG rồi đưa vào Tika/Tesseract.
-    private String readText(
-            BufferedImage image,
-            TesseractOCRParser parser
-    ) throws IOException, SAXException, TikaException {
-        byte[] imageBytes;
+    // Tìm vùng chữ, gom thành hàng rồi nhận dạng.
+    private String readText(BufferedImage image)
+            throws OrtException {
 
-        try (ByteArrayOutputStream output =
-                     new ByteArrayOutputStream()) {
+        List<Rectangle> regions = new ArrayList<>(
+                detectionService.detect(image)
+        );
 
-            boolean written = ImageIO.write(image, "png", output);
+        // Xét các vùng từ trên xuống dưới theo tâm của vùng.
+        regions.sort(
+                Comparator.comparingDouble(Rectangle::getCenterY)
+        );
 
-            if (!written) {
-                throw new IOException(
-                        "Không thể chuyển ảnh thành dữ liệu PNG"
+        List<List<Rectangle>> rows = new ArrayList<>();
+
+        for (Rectangle region : regions) {
+            List<Rectangle> matchedRow = null;
+            double nearestDistance = Double.MAX_VALUE;
+
+            // Tìm hàng phù hợp với vùng chữ hiện tại.
+            for (List<Rectangle> row : rows) {
+                Rectangle anchor = row.get(0);
+
+                double distance = Math.abs(
+                        region.getCenterY() - anchor.getCenterY()
                 );
+
+                double tolerance =
+                        Math.min(region.height, anchor.height) * 0.5;
+
+                if (distance <= tolerance
+                        && distance < nearestDistance) {
+                    matchedRow = row;
+                    nearestDistance = distance;
+                }
             }
 
-            imageBytes = output.toByteArray();
+            // Không thuộc hàng nào thì tạo hàng mới.
+            if (matchedRow == null) {
+                matchedRow = new ArrayList<>();
+                rows.add(matchedRow);
+            }
+
+            matchedRow.add(region);
         }
 
-        BodyContentHandler handler =
-                new BodyContentHandler(1_000_000);
+        StringBuilder result = new StringBuilder();
 
-        Metadata metadata = new Metadata();
-        ParseContext context = new ParseContext();
+        for (List<Rectangle> row : rows) {
+            // Trong mỗi hàng, đọc từ trái sang phải.
+            row.sort(
+                    Comparator.comparingInt(region -> region.x)
+            );
 
-        try (ByteArrayInputStream input =
-                     new ByteArrayInputStream(imageBytes)) {
+            StringBuilder line = new StringBuilder();
 
-            parser.parse(input, handler, metadata, context);
+            for (Rectangle region : row) {
+                BufferedImage lineImage = image.getSubimage(
+                        region.x,
+                        region.y,
+                        region.width,
+                        region.height
+                );
+
+                String text = recognitionService
+                        .recognize(lineImage)
+                        .trim();
+
+                if (!text.isEmpty()) {
+                    if (!line.isEmpty()) {
+                        line.append("\t");
+                    }
+
+                    line.append(text);
+                }
+            }
+
+            if (!line.isEmpty()) {
+                if (!result.isEmpty()) {
+                    result.append("\n");
+                }
+
+                result.append(line);
+            }
         }
 
-        return handler.toString().trim();
+        return result.toString();
     }
-
 }

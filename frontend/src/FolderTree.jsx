@@ -1,16 +1,26 @@
 import { useEffect, useState } from 'react';
 import { api } from './api.js';
 import FolderTreeNode from './FolderTreeNode.jsx';
+import FolderCreateForm from './FolderCreateForm.jsx';
 
-export default function FolderTree({ interaction }) {
+export default function FolderTree({
+                                       interaction,
+                                       reload = 0,
+                                   }) {
     const [roots, setRoots] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
+    const [showCreate, setShowCreate] = useState(false);
+
+    const createRequest = interaction.createRequest;
 
     useEffect(() => {
         let active = true;
 
         async function loadRoots() {
+            setLoading(true);
+            setError('');
+
             try {
                 const data = await api.folders();
 
@@ -33,49 +43,80 @@ export default function FolderTree({ interaction }) {
         return () => {
             active = false;
         };
-    }, []);
+    }, [reload]);
+
+    // Nút bên phải yêu cầu tạo thư mục gốc.
+    useEffect(() => {
+        if (!createRequest) return;
+
+        setShowCreate(createRequest.folderId === null);
+    }, [createRequest]);
+
+    function startCreate() {
+        if (interaction.disabled) return;
+
+        interaction.onClearCreateRequest();
+        setShowCreate(true);
+    }
+
+    function closeCreate() {
+        setShowCreate(false);
+        interaction.onClearCreateRequest();
+    }
+
+    async function createRoot(name) {
+        await interaction.onCreateFolder(name, null);
+    }
 
     return (
         <div>
-            <h2>Cây thư mục</h2>
-
             <div
-                onDragOver={(event) =>
-                    interaction.onDragOver(event, null)
-                }
-                onDragLeave={interaction.onDragLeave}
-                onDrop={(event) =>
-                    interaction.onDrop(event, null)
-                }
                 style={{
-                    padding: '12px',
-                    marginBottom: '12px',
-                    border: '2px dashed #94a3b8',
-                    borderRadius: '8px',
-                    background:
-                        interaction.dropTarget === 'root'
-                            ? '#dbeafe'
-                            : 'transparent',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '8px',
                 }}
             >
-                📂 Thư mục gốc
-                <small style={{ display: 'block', marginTop: '4px' }}>
-                    Thả folder vào đây để chuyển ra gốc
-                </small>
+                <h2>Cây thư mục</h2>
+
+                <button
+                    type="button"
+                    title="Tạo thư mục gốc"
+                    aria-label="Tạo thư mục gốc"
+                    disabled={interaction.disabled}
+                    onClick={startCreate}
+                >
+                    +
+                </button>
             </div>
 
-            {loading && <p>Đang tải...</p>}
-            {error && <p role="alert">{error}</p>}
+            {showCreate && (
+                <FolderCreateForm
+                    disabled={interaction.disabled}
+                    onCreate={createRoot}
+                    onCancel={closeCreate}
+                />
+            )}
+
+            {loading && (
+                <p role="status">Đang tải...</p>
+            )}
+
+            {error && (
+                <p role="alert">{error}</p>
+            )}
 
             {!loading && !error && roots.length === 0 && (
                 <p>Chưa có thư mục.</p>
             )}
 
-            {!loading && !error && roots.map((folder) => (
+            {!error && roots.map((folder) => (
                 <FolderTreeNode
                     key={folder.id}
                     folder={folder}
                     interaction={interaction}
+                    foldersReload={reload}
                 />
             ))}
         </div>

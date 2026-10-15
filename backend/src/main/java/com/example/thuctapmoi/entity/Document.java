@@ -88,6 +88,13 @@ public class Document {
     @Column(name = "extracted_text", columnDefinition = "nvarchar(max)")
     private String extractedText;
 
+    @Enumerated(EnumType.STRING)
+    @Column(length = 20)
+    private OcrStatus ocrStatus = OcrStatus.PENDING;
+
+    @Column(columnDefinition = "nvarchar(max)")
+    private String ocrError;
+
     // Có giá trị nghĩa là tài liệu đã bị xóa mềm
     private LocalDateTime deletedAt;
 
