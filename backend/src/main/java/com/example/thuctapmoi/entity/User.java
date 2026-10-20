@@ -22,6 +22,8 @@ public class User {
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 20)
     private UserRole role = UserRole.USER;
+    @Column(nullable = false)
+    private boolean enabled = true;
 
     public User() {}
 

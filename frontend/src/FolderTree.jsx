@@ -1,124 +1,110 @@
 import { useEffect, useState } from 'react';
 import { api } from './api.js';
 import FolderTreeNode from './FolderTreeNode.jsx';
-import FolderCreateForm from './FolderCreateForm.jsx';
+import InlineFolderForm from './InlineFolderForm.jsx';
 
-export default function FolderTree({
-                                       interaction,
-                                       reload = 0,
-                                   }) {
-    const [roots, setRoots] = useState([]);
+export default function FolderTree({ reload, interaction }) {
+    const [folders, setFolders] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
-    const [showCreate, setShowCreate] = useState(false);
-
-    const createRequest = interaction.createRequest;
-
+    const [retry, setRetry] = useState(0);
     useEffect(() => {
         let active = true;
-
-        async function loadRoots() {
-            setLoading(true);
-            setError('');
-
-            try {
-                const data = await api.folders();
-
-                if (active) {
-                    setRoots(data);
+        setLoading(true);
+        setError('');
+        api.folders(null)
+            .then((data) => {
+                if (!Array.isArray(data)) {
+                    throw new Error('Danh sách thư mục không hợp lệ.');
                 }
-            } catch (err) {
+                if (active) {
+                    setFolders(data);
+                }
+            })
+            .catch((err) => {
                 if (active) {
                     setError(err.message);
                 }
-            } finally {
+            })
+            .finally(() => {
                 if (active) {
                     setLoading(false);
                 }
-            }
-        }
-
-        loadRoots();
-
+            });
         return () => {
             active = false;
         };
-    }, [reload]);
-
-    // Nút bên phải yêu cầu tạo thư mục gốc.
-    useEffect(() => {
-        if (!createRequest) return;
-
-        setShowCreate(createRequest.folderId === null);
-    }, [createRequest]);
-
-    function startCreate() {
-        if (interaction.disabled) return;
-
-        interaction.onClearCreateRequest();
-        setShowCreate(true);
-    }
-
-    function closeCreate() {
-        setShowCreate(false);
-        interaction.onClearCreateRequest();
-    }
-
-    async function createRoot(name) {
-        await interaction.onCreateFolder(name, null);
-    }
-
+    }, [reload, retry]);
+    const request = interaction.createRequest;
     return (
-        <div>
-            <div
-                style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    gap: '8px',
-                }}
-            >
-                <h2>Cây thư mục</h2>
-
+        <nav aria-label="Cây thư mục" className="folder-tree">
+            <div className="tree-heading">
+                <strong>Thư mục</strong>
                 <button
                     type="button"
+                    className="icon-button"
                     title="Tạo thư mục gốc"
                     aria-label="Tạo thư mục gốc"
                     disabled={interaction.disabled}
-                    onClick={startCreate}
+                    onClick={() => interaction.onRequestCreate(null)}
                 >
                     +
                 </button>
             </div>
-
-            {showCreate && (
-                <FolderCreateForm
+            <div
+                className={`tree-root ${interaction.selectedFolderId == null ? 'selected' : ''} ${interaction.dropTarget === 'root' ? 'drop-target' : ''}`}
+                onDragOver={(event) => interaction.onDragOver(event, null)}
+                onDragLeave={interaction.onDragLeave}
+                onDrop={(event) => interaction.onDrop(event, null)}
+            >
+                <button
+                    type="button"
                     disabled={interaction.disabled}
-                    onCreate={createRoot}
-                    onCancel={closeCreate}
-                />
-            )}
-
-            {loading && (
-                <p role="status">Đang tải...</p>
-            )}
-
-            {error && (
-                <p role="alert">{error}</p>
-            )}
-
-            {!loading && !error && roots.length === 0 && (
-                <p>Chưa có thư mục.</p>
-            )}
-
-            {!error && roots.map((folder) => (
-                <FolderTreeNode
-                    key={folder.id}
-                    folder={folder}
+                    onClick={interaction.onOpenRoot}
+                >
+                    ⌂ <span>Thư mục gốc</span>
+                </button>
+            </div>
+            {request?.folderId === null && (
+                <InlineFolderForm
+                    key={request.version}
+                    parentId={null}
                     interaction={interaction}
-                    foldersReload={reload}
+                    onClose={interaction.onClearCreateRequest}
                 />
-            ))}
-        </div>
+            )}
+            {loading && (
+                <p className="tree-note" role="status">
+                    Đang tải…
+                </p>
+            )}
+            {error && (
+                <div className="tree-note">
+                    <p role="alert">{error}</p>
+                    <button
+                        type="button"
+                        disabled={interaction.disabled}
+                        onClick={() => setRetry((value) => value + 1)}
+                    >
+                        Thử lại
+                    </button>
+                </div>
+            )}
+            {!loading && !error && (
+                <ul className="tree-branches">
+                    {folders.map((folder) => (
+                        <FolderTreeNode
+                            key={folder.id}
+                            folder={folder}
+                            reload={reload}
+                            interaction={interaction}
+                        />
+                    ))}
+                </ul>
+            )}
+            {!loading && !error && folders.length === 0 && (
+                <p className="tree-note">Chưa có thư mục.</p>
+            )}
+        </nav>
     );
 }

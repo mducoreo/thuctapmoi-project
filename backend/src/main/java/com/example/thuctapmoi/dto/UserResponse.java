@@ -1,20 +1,18 @@
 package com.example.thuctapmoi.dto;
 
+import com.example.thuctapmoi.entity.UserRole;
+import lombok.AllArgsConstructor;
+import lombok.Getter;
+
+@Getter
+@AllArgsConstructor
 public class UserResponse {
 
     private final Long id;
+
     private final String username;
 
-    public UserResponse(Long id, String username) {
-        this.id = id;
-        this.username = username;
-    }
+    private final UserRole role;
 
-    public Long getId() {
-        return id;
-    }
-
-    public String getUsername() {
-        return username;
-    }
+    private final boolean enabled;
 }

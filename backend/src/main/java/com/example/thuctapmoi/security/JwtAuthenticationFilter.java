@@ -90,6 +90,17 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             return;
         }
 
+        if (!user.isEnabled()) {
+            SecurityContextHolder.clearContext();
+
+            response.sendError(
+                    HttpServletResponse.SC_UNAUTHORIZED,
+                    "Tài khoản đã bị khóa"
+            );
+
+            return;
+        }
+
         // 5. Ghi nhận người dùng đã được xác thực.
         var authentication =
                 new UsernamePasswordAuthenticationToken(

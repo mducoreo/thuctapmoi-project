@@ -2,12 +2,16 @@ import { useEffect, useRef, useState } from 'react';
 import { api } from './api.js';
 import FolderTree from './FolderTree.jsx';
 import DocumentList from './DocumentList.jsx';
-import DocumentMetadataForm, {
-    emptyMetadata,
-} from './DocumentMetadataForm.jsx';
+import DocumentMetadataForm, { emptyMetadata } from './DocumentMetadataForm.jsx';
+import WorkspaceModal from './WorkspaceModal.jsx';
+import WorkspaceMenu from './WorkspaceMenu.jsx';
+import OcrTextViewer from './OcrTextViewer.jsx';
+import DocumentPreview from './DocumentPreview.jsx';
 import './FoldersPage.css';
 
 const FOLDER_DRAG_TYPE = 'application/x-folder';
+const FOLDERS_VIEW_KEY = 'foldersPageView';
+const SEARCH_VIEW_PREFIX = 'foldersPageSearch:';
 
 const OCR_STATUS_NAMES = {
     PENDING: 'Chưa chạy OCR',
@@ -20,11 +24,49 @@ function ocrStatusName(status) {
     return OCR_STATUS_NAMES[status] ?? 'Chưa có trạng thái';
 }
 
+function readSessionValue(key) {
+    try {
+        return JSON.parse(sessionStorage.getItem(key) || 'null');
+    } catch {
+        return null;
+    }
+}
+
+function writeSessionValue(key, value) {
+    try {
+        sessionStorage.setItem(key, JSON.stringify(value));
+    } catch {
+        // Vẫn sử dụng được trang nếu trình duyệt không cho lưu.
+    }
+}
+
+function readFoldersView() {
+    const saved = readSessionValue(FOLDERS_VIEW_KEY);
+
+    const validPath =
+        Array.isArray(saved?.path) &&
+        saved.path.every(
+            (folder) =>
+                folder &&
+                Number.isInteger(folder.id) &&
+                typeof folder.name === 'string'
+        );
+
+    return {
+        path: validPath ? saved.path : [],
+        searchOpen: saved?.searchOpen === true,
+        sidebarCollapsed: saved?.sidebarCollapsed === true,
+    };
+}
+
 export default function FoldersPage({ onLogout }) {
+    const [savedView] = useState(readFoldersView);
+
     const [folders, setFolders] = useState([]);
-    const [path, setPath] = useState([]);
+    const [path, setPath] = useState(savedView.path);
     const [reload, setReload] = useState(0);
     const [documentsReload, setDocumentsReload] = useState(0);
+    const [searchOpen, setSearchOpen] = useState(savedView.searchOpen);
 
     const [loading, setLoading] = useState(true);
     const [busy, setBusy] = useState(false);
@@ -32,12 +74,12 @@ export default function FoldersPage({ onLogout }) {
     const [error, setError] = useState('');
     const [success, setSuccess] = useState('');
 
-    // Form bên phải chỉ dùng để sửa thư mục.
+    // Form đổi tên thư mục.
     const [showForm, setShowForm] = useState(false);
     const [editingFolder, setEditingFolder] = useState(null);
     const [name, setName] = useState('');
 
-    // Yêu cầu cây mở form tạo tại thư mục được chọn.
+    // Yêu cầu cây mở form tạo thư mục.
     const [treeCreateRequest, setTreeCreateRequest] = useState(null);
     const treeCreateVersion = useRef(0);
     const folderCreateLock = useRef(false);
@@ -45,11 +87,18 @@ export default function FoldersPage({ onLogout }) {
     const [draggedFolder, setDraggedFolder] = useState(null);
     const [dropTarget, setDropTarget] = useState(null);
 
+    const [uploadOpen, setUploadOpen] = useState(false);
+    const [sidebarCollapsed, setSidebarCollapsed] = useState(
+        savedView.sidebarCollapsed
+    );
+    const [folderMove, setFolderMove] = useState(null);
+    const [folderMoveTarget, setFolderMoveTarget] = useState('root');
     const [file, setFile] = useState(null);
     const [metadata, setMetadata] = useState(emptyMetadata);
     const [uploadError, setUploadError] = useState('');
     const [uploadSuccess, setUploadSuccess] = useState('');
 
+    // Thông tin tài liệu cần mở trong DocumentPreview.
     const [preview, setPreview] = useState(null);
     const [selectedDocumentId, setSelectedDocumentId] = useState(null);
     const documentSelectionVersion = useRef(0);
@@ -59,9 +108,17 @@ export default function FoldersPage({ onLogout }) {
     const [destinationFolders, setDestinationFolders] = useState([]);
     const [targetFolderId, setTargetFolderId] = useState('');
 
+    // Nội dung OCR đang xem và chỉnh sửa.
     const [ocrText, setOcrText] = useState('');
     const [ocrLoading, setOcrLoading] = useState(false);
     const [ocrError, setOcrError] = useState('');
+    const [ocrSavedText, setOcrSavedText] = useState('');
+    const [ocrTextLoaded, setOcrTextLoaded] = useState(false);
+    const [ocrSaving, setOcrSaving] = useState(false);
+    const [ocrSaveError, setOcrSaveError] = useState('');
+    const [ocrSaveSuccess, setOcrSaveSuccess] = useState('');
+
+    const ocrDirty = ocrTextLoaded && ocrText !== ocrSavedText;
 
     const documentLock = useRef(false);
     const fileInputRef = useRef(null);
@@ -75,7 +132,35 @@ export default function FoldersPage({ onLogout }) {
         busy ||
         loading ||
         showForm ||
-        Boolean(documentAction);
+        Boolean(documentAction) ||
+        uploadOpen ||
+        Boolean(folderMove) ||
+        Boolean(preview);
+
+    // Khôi phục vị trí đang xem khi tải lại trang.
+    useEffect(() => {
+        writeSessionValue(FOLDERS_VIEW_KEY, {
+            path,
+            searchOpen,
+            sidebarCollapsed,
+        });
+    }, [path, searchOpen, sidebarCollapsed]);
+
+    function handleLogout() {
+        try {
+            sessionStorage.removeItem(FOLDERS_VIEW_KEY);
+
+            const searchKeys = Object.keys(sessionStorage).filter(
+                (key) => key.startsWith(SEARCH_VIEW_PREFIX)
+            );
+
+            searchKeys.forEach((key) => sessionStorage.removeItem(key));
+        } catch {
+            // Vẫn tiếp tục đăng xuất nếu không truy cập được bộ nhớ.
+        }
+
+        onLogout();
+    }
 
     useEffect(() => {
         let active = true;
@@ -117,15 +202,27 @@ export default function FoldersPage({ onLogout }) {
         if (fileInputRef.current) {
             fileInputRef.current.value = '';
         }
+
+        setUploadOpen(false);
     }, [parentId]);
 
+    // Nhắc khi rời trang nếu nội dung OCR chưa lưu.
     useEffect(() => {
-        if (!preview) return;
+        if (!ocrDirty && !ocrSaving) {
+            return;
+        }
+
+        function warnBeforeLeaving(event) {
+            event.preventDefault();
+            event.returnValue = '';
+        }
+
+        window.addEventListener('beforeunload', warnBeforeLeaving);
 
         return () => {
-            URL.revokeObjectURL(preview.url);
+            window.removeEventListener('beforeunload', warnBeforeLeaving);
         };
-    }, [preview]);
+    }, [ocrDirty, ocrSaving]);
 
     function clearMessages() {
         setError('');
@@ -138,16 +235,12 @@ export default function FoldersPage({ onLogout }) {
         setName('');
     }
 
-    // Nút bên phải chỉ yêu cầu cây mở form tạo thư mục.
     function startCreate() {
-        if (
-            actionDisabled ||
-            moveLock.current ||
-            folderCreateLock.current
-        ) {
+        if (actionDisabled || moveLock.current || folderCreateLock.current) {
             return;
         }
 
+        setSidebarCollapsed(false);
         clearDocumentSelection();
         clearMessages();
 
@@ -164,16 +257,9 @@ export default function FoldersPage({ onLogout }) {
         setTreeCreateRequest(null);
     }
 
-    // Form trong cây gọi hàm này để lưu thư mục mới.
     async function createFolderFromTree(folderName, targetParentId) {
-        if (
-            actionDisabled ||
-            moveLock.current ||
-            folderCreateLock.current
-        ) {
-            throw new Error(
-                'Đang xử lý thao tác khác. Vui lòng thử lại.'
-            );
+        if (actionDisabled || moveLock.current || folderCreateLock.current) {
+            throw new Error('Đang xử lý thao tác khác. Vui lòng thử lại.');
         }
 
         folderCreateLock.current = true;
@@ -183,7 +269,6 @@ export default function FoldersPage({ onLogout }) {
 
         try {
             await api.createFolder(folderName, targetParentId);
-
             setTreeCreateRequest(null);
             setReload((value) => value + 1);
         } finally {
@@ -193,7 +278,9 @@ export default function FoldersPage({ onLogout }) {
     }
 
     function startEdit(folder) {
-        if (actionDisabled) return;
+        if (actionDisabled) {
+            return;
+        }
 
         clearMessages();
         setEditingFolder(folder);
@@ -201,7 +288,6 @@ export default function FoldersPage({ onLogout }) {
         setShowForm(true);
     }
 
-    // Chỉ lưu thay đổi tên thư mục.
     async function saveFolder(event) {
         event.preventDefault();
 
@@ -227,6 +313,14 @@ export default function FoldersPage({ onLogout }) {
                 editingFolder.parentId
             );
 
+            setPath((previous) =>
+                previous.map((item) =>
+                    item.id === editingFolder.id
+                        ? { ...item, name: folderName }
+                        : item
+                )
+            );
+
             setSuccess('Đã sửa thư mục.');
             closeForm();
             setReload((value) => value + 1);
@@ -238,6 +332,10 @@ export default function FoldersPage({ onLogout }) {
     }
 
     async function deleteFolder(folder) {
+        if (actionDisabled) {
+            return;
+        }
+
         if (!window.confirm(`Xóa thư mục "${folder.name}"?`)) {
             return;
         }
@@ -247,6 +345,12 @@ export default function FoldersPage({ onLogout }) {
 
         try {
             await api.deleteFolder(folder.id);
+
+            if (path.some((item) => item.id === folder.id)) {
+                setPath([]);
+                clearDocumentSelection();
+            }
+
             setSuccess('Đã xóa thư mục.');
             setReload((value) => value + 1);
         } catch (err) {
@@ -263,7 +367,6 @@ export default function FoldersPage({ onLogout }) {
 
         try {
             const data = await api.getFolder(folder.id);
-
             closeForm();
             setPath((previous) => [...previous, data]);
         } catch (err) {
@@ -295,7 +398,6 @@ export default function FoldersPage({ onLogout }) {
                 visited.add(id);
 
                 const data = await api.getFolder(id);
-
                 nextPath.unshift(data);
                 id = data.parentId ?? null;
             }
@@ -365,39 +467,19 @@ export default function FoldersPage({ onLogout }) {
         setSelectedDocumentId(null);
     }
 
-    async function openDocument(folderId, document) {
-        if (
-            busy ||
-            showForm ||
-            documentAction ||
-            documentLock.current ||
-            moveLock.current
-        ) {
+    // Component DocumentPreview tự lấy file và nội dung OCR.
+    function openDocument(folderId, document, highlightKeyword = '') {
+        if (actionDisabled || documentLock.current || moveLock.current) {
             return;
         }
 
         clearMessages();
-        setBusy(true);
 
-        try {
-            const blob = await api.documentContent(
-                folderId,
-                document.id
-            );
-
-            const url = URL.createObjectURL(blob);
-
-            setPreview({
-                url,
-                title: document.title || document.originalName,
-                originalName: document.originalName,
-                mimeType: blob.type || document.mimeType,
-            });
-        } catch (err) {
-            setError(err.message);
-        } finally {
-            setBusy(false);
-        }
+        setPreview({
+            folderId,
+            document,
+            highlightKeyword,
+        });
     }
 
     function refreshDocuments() {
@@ -429,15 +511,38 @@ export default function FoldersPage({ onLogout }) {
         }
     }
 
-    async function loadDocumentText(folderId, document, run) {
+    async function loadDocumentText(
+        folderId,
+        document,
+        run,
+        highlightKeyword = ''
+    ) {
+        if (documentLock.current || busy || ocrSaving) {
+            return;
+        }
+
+        if (
+            ocrDirty &&
+            !window.confirm(
+                'Nội dung OCR chưa được lưu. Bỏ thay đổi và tiếp tục?'
+            )
+        ) {
+            return;
+        }
+
         await runDocumentAction(async () => {
             setOcrText('');
+            setOcrSavedText('');
+            setOcrTextLoaded(false);
+            setOcrSaveError('');
+            setOcrSaveSuccess('');
             setOcrError('');
             setOcrLoading(true);
 
             setDocumentAction({
                 type: 'ocr',
                 mode: run ? 'run' : 'view',
+                highlightKeyword,
                 folderId,
                 document: {
                     ...document,
@@ -453,18 +558,18 @@ export default function FoldersPage({ onLogout }) {
                     ? await api.runOcr(folderId, document.id)
                     : await api.getExtractedText(folderId, document.id);
 
-                const text = typeof data === 'string'
-                    ? data
-                    : data?.text ?? '';
+                const text =
+                    typeof data === 'string'
+                        ? data
+                        : (data?.extractedText ?? data?.text ?? '');
 
                 setOcrText(text);
-
+                setOcrSavedText(text);
+                setOcrTextLoaded(true);
             } catch (err) {
                 errorMessage = err.message || 'Không thể lấy nội dung OCR.';
-
             } finally {
                 try {
-                    // Luôn lấy lại trạng thái đã lưu, kể cả khi OCR thất bại.
                     const detail = await api.documentDetail(
                         folderId,
                         document.id
@@ -484,7 +589,6 @@ export default function FoldersPage({ onLogout }) {
                             document: detail,
                         };
                     });
-
                 } catch (err) {
                     const detailError =
                         'Không tải được trạng thái OCR mới nhất. ' +
@@ -506,39 +610,104 @@ export default function FoldersPage({ onLogout }) {
     }
 
     async function runDocumentOcr(folderId, document) {
-        if (actionDisabled || documentLock.current) return;
+        if (actionDisabled || documentLock.current) {
+            return;
+        }
 
         await loadDocumentText(folderId, document, true);
     }
 
-    async function showDocumentText(folderId, document) {
-        if (actionDisabled || documentLock.current) return;
+    async function showDocumentText(
+        folderId,
+        document,
+        highlightKeyword = ''
+    ) {
+        if (actionDisabled || documentLock.current) {
+            return;
+        }
 
-        await loadDocumentText(folderId, document, false);
+        await loadDocumentText(
+            folderId,
+            document,
+            false,
+            highlightKeyword
+        );
     }
 
     async function retryDocumentText() {
-        if (documentAction?.type !== 'ocr') return;
+        if (documentAction?.type !== 'ocr') {
+            return;
+        }
 
         const action = documentAction;
 
         await loadDocumentText(
             action.folderId,
             action.document,
-            action.mode === 'run'
+            action.mode === 'run',
+            action.highlightKeyword ?? ''
         );
     }
 
     async function rerunDocumentOcr() {
-        if (documentAction?.type !== 'ocr') return;
+        if (documentAction?.type !== 'ocr') {
+            return;
+        }
 
         const action = documentAction;
 
         await loadDocumentText(
             action.folderId,
             action.document,
-            true
+            true,
+            action.highlightKeyword ?? ''
         );
+    }
+
+    async function saveDocumentText() {
+        if (
+            documentAction?.type !== 'ocr' ||
+            !ocrTextLoaded ||
+            !ocrDirty ||
+            ocrLoading ||
+            ocrSaving ||
+            documentAction.document.ocrStatus === 'PROCESSING'
+        ) {
+            return;
+        }
+
+        const action = documentAction;
+        const editedText = ocrText;
+
+        await runDocumentAction(async () => {
+            setOcrSaving(true);
+            setOcrSaveError('');
+            setOcrSaveSuccess('');
+
+            try {
+                const data = await api.updateExtractedText(
+                    action.folderId,
+                    action.document.id,
+                    editedText
+                );
+
+                const savedText =
+                    typeof data === 'string'
+                        ? data
+                        : (data?.extractedText ?? data?.text ?? editedText);
+
+                setOcrText(savedText);
+                setOcrSavedText(savedText);
+                setOcrSaveSuccess('Đã lưu nội dung OCR.');
+                refreshDocuments();
+            } catch (err) {
+                setOcrSaveError(
+                    err.message || 'Không thể lưu nội dung OCR.'
+                );
+            } finally {
+                setOcrSaving(false);
+            }
+        });
     }
 
     function canRunOcr(document) {
@@ -552,13 +721,12 @@ export default function FoldersPage({ onLogout }) {
     }
 
     async function showDocumentDetail(folderId, document) {
-        if (actionDisabled) return;
+        if (actionDisabled) {
+            return;
+        }
 
         await runDocumentAction(async () => {
-            const detail = await api.documentDetail(
-                folderId,
-                document.id
-            );
+            const detail = await api.documentDetail(folderId, document.id);
 
             setDocumentAction({
                 type: 'detail',
@@ -616,10 +784,7 @@ export default function FoldersPage({ onLogout }) {
     async function loadDestinationFolders() {
         const result = [];
         const visited = new Set();
-
-        const queue = [
-            { parentId: null, prefix: '' },
-        ];
+        const queue = [{ parentId: null, prefix: '' }];
 
         for (let index = 0; index < queue.length; index += 1) {
             const item = queue[index];
@@ -658,7 +823,9 @@ export default function FoldersPage({ onLogout }) {
     }
 
     async function startMoveDocument(folderId, document) {
-        if (actionDisabled) return;
+        if (actionDisabled) {
+            return;
+        }
 
         await runDocumentAction(async () => {
             const choices = await loadDestinationFolders();
@@ -666,7 +833,6 @@ export default function FoldersPage({ onLogout }) {
             setDestinationFolders(
                 choices.filter((folder) => folder.id !== folderId)
             );
-
             setTargetFolderId('');
 
             setDocumentAction({
@@ -715,11 +881,7 @@ export default function FoldersPage({ onLogout }) {
             return;
         }
 
-        if (
-            !window.confirm(
-                `Xóa tài liệu "${document.originalName}"?`
-            )
-        ) {
+        if (!window.confirm(`Xóa tài liệu "${document.originalName}"?`)) {
             return;
         }
 
@@ -737,9 +899,14 @@ export default function FoldersPage({ onLogout }) {
         });
     }
 
-    async function permanentDeleteDocument(folderId, document) {
+    async function permanentDeleteDocument(
+        folderId,
+        document,
+        fromDetail = false
+    ) {
         if (
-            actionDisabled ||
+            (!fromDetail && actionDisabled) ||
+            busy ||
             documentLock.current ||
             moveLock.current
         ) {
@@ -757,10 +924,7 @@ export default function FoldersPage({ onLogout }) {
 
         await runDocumentAction(async () => {
             try {
-                await api.permanentDeleteDocument(
-                    folderId,
-                    document.id
-                );
+                await api.permanentDeleteDocument(folderId, document.id);
             } finally {
                 setPreview(null);
 
@@ -771,19 +935,18 @@ export default function FoldersPage({ onLogout }) {
                 refreshDocuments();
             }
 
+            setDocumentAction(null);
             setSuccess('Đã xóa vĩnh viễn tài liệu.');
         });
     }
 
     async function downloadDocument(folderId, item) {
-        if (actionDisabled) return;
+        if (actionDisabled) {
+            return;
+        }
 
         await runDocumentAction(async () => {
-            const blob = await api.downloadDocument(
-                folderId,
-                item.id
-            );
-
+            const blob = await api.downloadDocument(folderId, item.id);
             const url = URL.createObjectURL(blob);
             const link = window.document.createElement('a');
 
@@ -796,11 +959,7 @@ export default function FoldersPage({ onLogout }) {
                 link.click();
             } finally {
                 link.remove();
-
-                window.setTimeout(
-                    () => URL.revokeObjectURL(url),
-                    60000
-                );
+                window.setTimeout(() => URL.revokeObjectURL(url), 60000);
             }
 
             setSuccess('Đã gửi file cho trình duyệt tải xuống.');
@@ -812,8 +971,22 @@ export default function FoldersPage({ onLogout }) {
             return;
         }
 
+        if (
+            documentAction?.type === 'ocr' &&
+            ocrDirty &&
+            !window.confirm(
+                'Nội dung OCR chưa được lưu. Bỏ thay đổi và đóng?'
+            )
+        ) {
+            return;
+        }
+
         setDocumentAction(null);
         setOcrText('');
+        setOcrSavedText('');
+        setOcrTextLoaded(false);
+        setOcrSaveError('');
+        setOcrSaveSuccess('');
         setOcrError('');
         setError('');
     }
@@ -828,7 +1001,14 @@ export default function FoldersPage({ onLogout }) {
     async function uploadDocument(event) {
         event.preventDefault();
 
-        if (uploadLock.current || actionDisabled) {
+        if (
+            uploadLock.current ||
+            busy ||
+            loading ||
+            showForm ||
+            documentAction ||
+            folderMove
+        ) {
             return;
         }
 
@@ -836,9 +1016,7 @@ export default function FoldersPage({ onLogout }) {
         setUploadSuccess('');
 
         if (parentId == null) {
-            setUploadError(
-                'Mở một thư mục trước khi tải tài liệu lên.'
-            );
+            setUploadError('Mở một thư mục trước khi tải tài liệu lên.');
             return;
         }
 
@@ -853,24 +1031,17 @@ export default function FoldersPage({ onLogout }) {
         }
 
         const selectedFile = file;
-
         uploadLock.current = true;
         setBusy(true);
 
         try {
-            await api.uploadDocument(
-                parentId,
-                selectedFile,
-                {
-                    ...metadata,
-                    title: metadata.title.trim(),
-                }
-            );
+            await api.uploadDocument(parentId, selectedFile, {
+                ...metadata,
+                title: metadata.title.trim(),
+            });
 
-            setUploadSuccess(
-                `Đã tải lên file "${selectedFile.name}".`
-            );
-
+            setSuccess(`Đã tải lên file "${selectedFile.name}".`);
+            setUploadOpen(false);
             setFile(null);
             setMetadata(emptyMetadata());
 
@@ -902,7 +1073,6 @@ export default function FoldersPage({ onLogout }) {
         };
 
         event.dataTransfer.effectAllowed = 'move';
-
         event.dataTransfer.setData(
             FOLDER_DRAG_TYPE,
             JSON.stringify(payload)
@@ -918,11 +1088,7 @@ export default function FoldersPage({ onLogout }) {
     }
 
     function canDrop(targetFolder) {
-        if (
-            actionDisabled ||
-            moveLock.current ||
-            !draggedFolder
-        ) {
+        if (actionDisabled || moveLock.current || !draggedFolder) {
             return false;
         }
 
@@ -946,9 +1112,7 @@ export default function FoldersPage({ onLogout }) {
         event.preventDefault();
         event.dataTransfer.dropEffect = 'move';
 
-        setDropTarget(
-            targetFolder ? String(targetFolder.id) : 'root'
-        );
+        setDropTarget(targetFolder ? String(targetFolder.id) : 'root');
     }
 
     function handleDragLeave(event) {
@@ -969,17 +1133,15 @@ export default function FoldersPage({ onLogout }) {
         event.stopPropagation();
         setDropTarget(null);
 
-        if (
-            actionDisabled ||
-            moveLock.current ||
-            !draggedFolder
-        ) {
+        if (actionDisabled || moveLock.current || !draggedFolder) {
             return;
         }
 
         const raw = event.dataTransfer.getData(FOLDER_DRAG_TYPE);
 
-        if (!raw) return;
+        if (!raw) {
+            return;
+        }
 
         let source;
 
@@ -1015,9 +1177,7 @@ export default function FoldersPage({ onLogout }) {
                 ? `"${targetFolder.name}"`
                 : 'thư mục gốc';
 
-            setSuccess(
-                `Đã chuyển "${source.name}" vào ${destination}.`
-            );
+            setSuccess(`Đã chuyển "${source.name}" vào ${destination}.`);
 
             clearDocumentSelection();
             setTreeCreateRequest(null);
@@ -1031,27 +1191,130 @@ export default function FoldersPage({ onLogout }) {
         }
     }
 
+    function requestCreateInTree(folder, ancestorIds = []) {
+        if (actionDisabled) {
+            return;
+        }
+
+        setSidebarCollapsed(false);
+        clearMessages();
+        treeCreateVersion.current += 1;
+
+        setTreeCreateRequest({
+            version: treeCreateVersion.current,
+            folderId: folder?.id ?? null,
+            ancestorIds,
+        });
+    }
+
+    function openRoot() {
+        if (actionDisabled) {
+            return;
+        }
+
+        clearDocumentSelection();
+        clearMessages();
+        closeForm();
+        setPath([]);
+    }
+
+    async function startMoveFolder(folder) {
+        if (actionDisabled || moveLock.current) {
+            return;
+        }
+
+        setBusy(true);
+        clearMessages();
+
+        try {
+            const all = await loadDestinationFolders();
+
+            const excluded = new Set([folder.id]);
+            const queue = [folder.id];
+
+            for (let i = 0; i < queue.length; i += 1) {
+                const children = await api.folders(queue[i]);
+
+                for (const child of children) {
+                    if (!excluded.has(child.id)) {
+                        excluded.add(child.id);
+                        queue.push(child.id);
+                    }
+                }
+            }
+
+            setDestinationFolders(
+                all.filter((item) => !excluded.has(item.id))
+            );
+
+            setFolderMoveTarget(
+                folder.parentId == null ? 'root' : String(folder.parentId)
+            );
+
+            setFolderMove(folder);
+        } catch (err) {
+            setError(err.message);
+        } finally {
+            setBusy(false);
+        }
+    }
+
+    async function saveFolderMove(event) {
+        event.preventDefault();
+
+        if (!folderMove || busy || moveLock.current) {
+            return;
+        }
+
+        const targetId =
+            folderMoveTarget === 'root' ? null : Number(folderMoveTarget);
+
+        if ((folderMove.parentId ?? null) === targetId) {
+            setFolderMove(null);
+            return;
+        }
+
+        moveLock.current = true;
+        setBusy(true);
+        clearMessages();
+
+        try {
+            await api.moveFolder(folderMove.id, targetId);
+
+            setFolderMove(null);
+            setPath([]);
+            setTreeCreateRequest(null);
+            clearDocumentSelection();
+            setReload((value) => value + 1);
+            setSuccess('Đã di chuyển thư mục.');
+        } catch (err) {
+            setError(err.message);
+        } finally {
+            moveLock.current = false;
+            setBusy(false);
+        }
+    }
+
     const interaction = {
         disabled: actionDisabled,
+        selectedAncestorIds: path.map((folder) => folder.id),
+        onOpenRoot: openRoot,
+        onRequestCreate: requestCreateInTree,
+        onRenameFolder: startEdit,
+        onMoveFolder: startMoveFolder,
+        onDeleteFolder: deleteFolder,
         draggedFolderId: draggedFolder?.id ?? null,
         dropTarget,
-
         selectedFolderId: parentId,
         selectedDocumentId,
-
-        documentDisabled:
-            busy || showForm || Boolean(documentAction),
-
+        documentDisabled: busy || showForm || Boolean(documentAction),
         documentsReload,
-
         createRequest: treeCreateRequest,
         onClearCreateRequest: clearTreeCreateRequest,
         onCreateFolder: createFolderFromTree,
-
         onSelectDocument: selectDocumentFromTree,
         onOpen: openFolderFromTree,
         onOpenDocument: openDocument,
-
         onDragStart: handleDragStart,
         onDragEnd: handleDragEnd,
         onDragOver: handleDragOver,
@@ -1060,23 +1323,22 @@ export default function FoldersPage({ onLogout }) {
     };
 
     return (
-        <main
-            className="folders-page"
-            style={{
-                minHeight: '100vh',
-                boxSizing: 'border-box',
-            }}
-            onDragOver={(event) => handleDragOver(event, null)}
-            onDragLeave={handleDragLeave}
-            onDrop={(event) => handleDrop(event, null)}
-        >
+        <main className="folders-page">
             <div className="folders-workspace">
                 <header className="folders-header">
                     QUẢN LÝ HỒ SƠ, VĂN BẢN
                 </header>
 
-                <div className="folders-layout">
-                    <aside className="folders-sidebar">
+                <div
+                    className={`folders-layout ${
+                        sidebarCollapsed ? 'sidebar-collapsed' : ''
+                    }`}
+                >
+                    <aside
+                        className="folders-sidebar"
+                        aria-label="Thanh bên thư mục"
+                        hidden={sidebarCollapsed}
+                    >
                         <FolderTree
                             reload={reload}
                             interaction={interaction}
@@ -1085,11 +1347,59 @@ export default function FoldersPage({ onLogout }) {
 
                     <section className="folders-content">
                         <div className="folders-toolbar">
+                            <button
+                                type="button"
+                                className="icon-button sidebar-toggle"
+                                aria-label={
+                                    sidebarCollapsed
+                                        ? 'Mở cây thư mục'
+                                        : 'Thu gọn cây thư mục'
+                                }
+                                aria-expanded={!sidebarCollapsed}
+                                onClick={() =>
+                                    setSidebarCollapsed((value) => !value)
+                                }
+                            >
+                                ☰
+                            </button>
+
                             <h1>
                                 {currentFolder?.name ?? 'Thư mục gốc'}
                             </h1>
 
                             <div className="folders-actions">
+                                <button
+                                    type="button"
+                                    disabled={actionDisabled}
+                                    aria-pressed={searchOpen}
+                                    onClick={() => {
+                                        clearDocumentSelection();
+                                        clearMessages();
+                                        setSearchOpen((value) => !value);
+                                    }}
+                                >
+                                    {searchOpen
+                                        ? 'Đóng tìm kiếm'
+                                        : 'Tìm kiếm và phân trang'}
+                                </button>
+
+                                {currentFolder && (
+                                    <button
+                                        type="button"
+                                        className="folders-primary"
+                                        disabled={actionDisabled}
+                                        onClick={() => {
+                                            clearMessages();
+                                            setFile(null);
+                                            setMetadata(emptyMetadata());
+                                            setUploadError('');
+                                            setUploadOpen(true);
+                                        }}
+                                    >
+                                        ＋ Tải tài liệu
+                                    </button>
+                                )}
+
                                 {currentFolder && (
                                     <button
                                         type="button"
@@ -1102,11 +1412,9 @@ export default function FoldersPage({ onLogout }) {
 
                                 <button
                                     type="button"
-                                    className="folders-primary"
                                     onClick={startCreate}
                                     disabled={
-                                        actionDisabled ||
-                                        Boolean(loadError)
+                                        actionDisabled || Boolean(loadError)
                                     }
                                 >
                                     + Tạo thư mục
@@ -1114,7 +1422,7 @@ export default function FoldersPage({ onLogout }) {
 
                                 <button
                                     type="button"
-                                    onClick={onLogout}
+                                    onClick={handleLogout}
                                     disabled={busy}
                                 >
                                     Đăng xuất
@@ -1122,69 +1430,63 @@ export default function FoldersPage({ onLogout }) {
                             </div>
                         </div>
 
-                        {currentFolder && (
-                            <>
-                                <form
-                                    className="folders-form"
-                                    onSubmit={uploadDocument}
-                                >
-                                    <h2>Tải tài liệu lên</h2>
+                        <nav
+                            className="folder-breadcrumb"
+                            aria-label="Đường dẫn thư mục"
+                        >
+                            <button
+                                type="button"
+                                disabled={actionDisabled}
+                                onClick={openRoot}
+                            >
+                                Hồ sơ
+                            </button>
 
-                                    <label htmlFor="documentFile">
-                                        Chọn file
-                                    </label>
-
-                                    <input
-                                        ref={fileInputRef}
-                                        id="documentFile"
-                                        type="file"
-                                        disabled={actionDisabled}
-                                        onChange={(event) => {
-                                            setFile(
-                                                event.target.files?.[0] ??
-                                                null
-                                            );
-
-                                            setUploadError('');
-                                            setUploadSuccess('');
-                                        }}
-                                    />
-
-                                    <DocumentMetadataForm
-                                        value={metadata}
-                                        onChange={setMetadata}
-                                        disabled={actionDisabled}
-                                    />
-
+                            {path.map((folder, index) => (
+                                <span key={folder.id}>
+                                    {' / '}
                                     <button
-                                        type="submit"
-                                        className="folders-primary"
-                                        disabled={actionDisabled || !file}
+                                        type="button"
+                                        disabled={actionDisabled}
+                                        aria-current={
+                                            index === path.length - 1
+                                                ? 'page'
+                                                : undefined
+                                        }
+                                        onClick={() => {
+                                            clearDocumentSelection();
+                                            setPath(path.slice(0, index + 1));
+                                        }}
                                     >
-                                        {uploadLock.current
-                                            ? 'Đang tải lên...'
-                                            : 'Upload'}
+                                        {folder.name}
                                     </button>
+                                </span>
+                            ))}
+                        </nav>
 
-                                    {uploadError && (
-                                        <p
-                                            className="message error"
-                                            role="alert"
-                                        >
-                                            {uploadError}
-                                        </p>
-                                    )}
-
-                                    {uploadSuccess && (
-                                        <p
-                                            className="message success"
-                                            role="status"
-                                        >
-                                            {uploadSuccess}
-                                        </p>
-                                    )}
-                                </form>
-
+                        {searchOpen ? (
+                            <DocumentSearchPanel
+                                key={parentId}
+                                folderId={parentId}
+                                selectedDocumentId={selectedDocumentId}
+                                reload={documentsReload}
+                                disabled={actionDisabled}
+                                onBusyChange={setBusy}
+                                onOpenDocument={openDocument}
+                                onDetailDocument={showDocumentDetail}
+                                onRenameDocument={startRenameDocument}
+                                onMoveDocument={startMoveDocument}
+                                onDeleteDocument={deleteDocument}
+                                onPermanentDeleteDocument={
+                                    permanentDeleteDocument
+                                }
+                                onDownloadDocument={downloadDocument}
+                                onRunDocumentOcr={runDocumentOcr}
+                                onShowDocumentText={showDocumentText}
+                                onDocumentsChanged={refreshDocuments}
+                            />
+                        ) : (
+                            currentFolder && (
                                 <DocumentList
                                     key={parentId}
                                     folderId={parentId}
@@ -1205,16 +1507,12 @@ export default function FoldersPage({ onLogout }) {
                                     onShowDocumentText={showDocumentText}
                                     onDocumentsChanged={refreshDocuments}
                                 />
-                            </>
+                            )
                         )}
 
-                        <h2>Thư mục con</h2>
-
-                        <p>
-                            Kéo thư mục lên thư mục khác để chuyển vào.
-                            {' '}
-                            Thả vào khoảng trống để chuyển về thư mục gốc.
-                        </p>
+                        <h2 className="subfolders-heading">
+                            {currentFolder ? 'Thư mục con' : 'Các thư mục'}
+                        </h2>
 
                         {error && (
                             <p className="message error" role="alert">
@@ -1228,49 +1526,52 @@ export default function FoldersPage({ onLogout }) {
                             </p>
                         )}
 
-                        {/* Bên phải chỉ giữ form sửa thư mục. */}
                         {showForm && editingFolder && (
-                            <form
-                                className="folders-form"
-                                onSubmit={saveFolder}
+                            <WorkspaceModal
+                                title="Đổi tên thư mục"
+                                busy={busy}
+                                onClose={closeForm}
                             >
-                                <h2>Sửa thư mục</h2>
+                                <form
+                                    className="folders-form"
+                                    onSubmit={saveFolder}
+                                >
+                                    <label htmlFor="folderName">
+                                        Tên thư mục
+                                    </label>
 
-                                <label htmlFor="folderName">
-                                    Tên thư mục
-                                </label>
-
-                                <input
-                                    id="folderName"
-                                    autoFocus
-                                    value={name}
-                                    onChange={(event) =>
-                                        setName(event.target.value)
-                                    }
-                                    placeholder="Nhập tên thư mục"
-                                    maxLength={100}
-                                    disabled={busy}
-                                    required
-                                />
-
-                                <div className="folders-actions">
-                                    <button
-                                        type="submit"
-                                        className="folders-primary"
+                                    <input
+                                        id="folderName"
+                                        autoFocus
+                                        value={name}
+                                        onChange={(event) =>
+                                            setName(event.target.value)
+                                        }
+                                        placeholder="Nhập tên thư mục"
+                                        maxLength={100}
                                         disabled={busy}
-                                    >
-                                        {busy ? 'Đang lưu...' : 'Lưu'}
-                                    </button>
+                                        required
+                                    />
 
-                                    <button
-                                        type="button"
-                                        onClick={closeForm}
-                                        disabled={busy}
-                                    >
-                                        Hủy
-                                    </button>
-                                </div>
-                            </form>
+                                    <div className="folders-actions">
+                                        <button
+                                            type="submit"
+                                            className="folders-primary"
+                                            disabled={busy}
+                                        >
+                                            {busy ? 'Đang lưu...' : 'Lưu'}
+                                        </button>
+
+                                        <button
+                                            type="button"
+                                            onClick={closeForm}
+                                            disabled={busy}
+                                        >
+                                            Hủy
+                                        </button>
+                                    </div>
+                                </form>
+                            </WorkspaceModal>
                         )}
 
                         {busy && !showForm && (
@@ -1281,10 +1582,7 @@ export default function FoldersPage({ onLogout }) {
 
                         {!loading && loadError && (
                             <>
-                                <p
-                                    className="message error"
-                                    role="alert"
-                                >
+                                <p className="message error" role="alert">
                                     {loadError}
                                 </p>
 
@@ -1300,15 +1598,28 @@ export default function FoldersPage({ onLogout }) {
                             </>
                         )}
 
-                        {!loading && !loadError && (
-                            folders.length === 0 ? (
+                        {!loading &&
+                            !loadError &&
+                            (folders.length === 0 ? (
                                 <p>Chưa có thư mục con nào.</p>
                             ) : (
                                 <ul className="folders-list">
                                     {folders.map((folder) => (
                                         <li
                                             key={folder.id}
-                                            className="folders-item"
+                                            className={`folders-item ${
+                                                dropTarget === String(folder.id)
+                                                    ? 'is-drop-target'
+                                                    : ''
+                                            } ${
+                                                draggedFolder?.id === folder.id
+                                                    ? 'is-dragging'
+                                                    : ''
+                                            } ${
+                                                actionDisabled
+                                                    ? 'is-locked'
+                                                    : ''
+                                            }`}
                                             draggable={!actionDisabled}
                                             onDragStart={(event) =>
                                                 handleDragStart(event, folder)
@@ -1321,21 +1632,6 @@ export default function FoldersPage({ onLogout }) {
                                             onDrop={(event) =>
                                                 handleDrop(event, folder)
                                             }
-                                            style={{
-                                                background:
-                                                    dropTarget ===
-                                                    String(folder.id)
-                                                        ? '#dbeafe'
-                                                        : undefined,
-                                                opacity:
-                                                    draggedFolder?.id ===
-                                                    folder.id
-                                                        ? 0.45
-                                                        : 1,
-                                                cursor: actionDisabled
-                                                    ? 'default'
-                                                    : 'grab',
-                                            }}
                                         >
                                             <div className="folders-info">
                                                 <span
@@ -1346,101 +1642,209 @@ export default function FoldersPage({ onLogout }) {
                                                 </span>
 
                                                 <div>
-                                                    <strong>
+                                                    <button
+                                                        type="button"
+                                                        className="folder-open-name"
+                                                        disabled={actionDisabled}
+                                                        onClick={() =>
+                                                            openFolder(folder)
+                                                        }
+                                                    >
                                                         {folder.name}
-                                                    </strong>
-
-                                                    <p>
-                                                        Chủ sở hữu:{' '}
-                                                        {folder.ownerUsername}
-                                                    </p>
+                                                    </button>
                                                 </div>
                                             </div>
 
-                                            <div className="folders-actions">
-                                                <button
-                                                    type="button"
-                                                    onClick={() =>
-                                                        openFolder(folder)
-                                                    }
-                                                    disabled={actionDisabled}
-                                                >
-                                                    Mở
-                                                </button>
-
-                                                <button
-                                                    type="button"
-                                                    onClick={() =>
-                                                        startEdit(folder)
-                                                    }
-                                                    disabled={actionDisabled}
-                                                >
-                                                    Sửa
-                                                </button>
-
-                                                <button
-                                                    type="button"
-                                                    className="folders-danger"
-                                                    onClick={() =>
-                                                        deleteFolder(folder)
-                                                    }
-                                                    disabled={actionDisabled}
-                                                >
-                                                    Xóa
-                                                </button>
-                                            </div>
+                                            <WorkspaceMenu
+                                                label={`Thao tác thư mục ${folder.name}`}
+                                                disabled={actionDisabled}
+                                                items={[
+                                                    {
+                                                        label: 'Mở thư mục',
+                                                        onClick: () =>
+                                                            openFolder(folder),
+                                                    },
+                                                    {
+                                                        label: 'Đổi tên thư mục',
+                                                        onClick: () =>
+                                                            startEdit(folder),
+                                                    },
+                                                    {
+                                                        label: 'Di chuyển thư mục',
+                                                        onClick: () =>
+                                                            startMoveFolder(folder),
+                                                    },
+                                                    {
+                                                        label: 'Xóa thư mục',
+                                                        danger: true,
+                                                        onClick: () =>
+                                                            deleteFolder(folder),
+                                                    },
+                                                ]}
+                                            />
                                         </li>
                                     ))}
                                 </ul>
-                            )
-                        )}
+                            ))}
                     </section>
                 </div>
             </div>
 
-            {documentAction && (
-                <div
-                    style={{
-                        position: 'fixed',
-                        inset: 0,
-                        zIndex: 1100,
-                        background: 'rgba(0,0,0,0.55)',
-                        padding: '20px',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                    }}
-                    onKeyDown={(event) => {
-                        if (event.key === 'Escape') {
-                            closeDocumentAction();
-                        }
-                    }}
+            {uploadOpen && (
+                <WorkspaceModal
+                    title="Tải tài liệu lên"
+                    busy={busy}
+                    onClose={() => setUploadOpen(false)}
                 >
-                    <section
-                        role="dialog"
-                        aria-modal="true"
-                        aria-labelledby="document-action-title"
-                        style={{
-                            background: '#fff',
-                            borderRadius: '12px',
-                            padding: '20px',
-                            width: 'min(650px, 100%)',
-                            maxHeight: '85vh',
-                            overflow: 'auto',
-                            overflowWrap: 'anywhere',
-                        }}
+                    <form
+                        className="workspace-form upload-form"
+                        onSubmit={uploadDocument}
                     >
-                        <h2 id="document-action-title">
-                            {documentAction.type === 'detail'
-                                ? 'Chi tiết tài liệu'
-                                : documentAction.type === 'rename'
-                                    ? 'Đổi tên file'
-                                    : documentAction.type === 'ocr'
-                                        ? 'Nội dung chữ của tài liệu'
-                                        : 'Di chuyển tài liệu'}
-                        </h2>
+                        <label htmlFor="documentFile">Chọn file</label>
 
-                        {documentAction.type === 'detail' && (
+                        <input
+                            ref={fileInputRef}
+                            id="documentFile"
+                            type="file"
+                            disabled={busy}
+                            onChange={(event) => {
+                                setFile(event.target.files?.[0] ?? null);
+
+                                const chosen = event.target.files?.[0];
+
+                                if (chosen && !metadata.title.trim()) {
+                                    setMetadata((value) => ({
+                                        ...value,
+                                        title: chosen.name.replace(/\.[^.]+$/, ''),
+                                    }));
+                                }
+
+                                setUploadError('');
+                                setUploadSuccess('');
+                            }}
+                        />
+
+                        <DocumentMetadataForm
+                            compact
+                            value={metadata}
+                            onChange={setMetadata}
+                            disabled={busy}
+                        />
+
+                        <div className="modal-footer">
+                            <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => setUploadOpen(false)}
+                            >
+                                Hủy
+                            </button>
+
+                            <button
+                                type="submit"
+                                className="folders-primary"
+                                disabled={busy || !file}
+                            >
+                                {uploadLock.current
+                                    ? 'Đang tải lên...'
+                                    : 'Tải lên'}
+                            </button>
+                        </div>
+
+                        {uploadError && (
+                            <p className="message error" role="alert">
+                                {uploadError}
+                            </p>
+                        )}
+
+                        {uploadSuccess && (
+                            <p className="message success" role="status">
+                                {uploadSuccess}
+                            </p>
+                        )}
+                    </form>
+                </WorkspaceModal>
+            )}
+
+            {folderMove && (
+                <WorkspaceModal
+                    title="Di chuyển thư mục"
+                    busy={busy}
+                    onClose={() => setFolderMove(null)}
+                >
+                    <form
+                        className="workspace-form"
+                        onSubmit={saveFolderMove}
+                    >
+                        <p>
+                            Thư mục: <strong>{folderMove.name}</strong>
+                        </p>
+
+                        <label>
+                            Chuyển đến
+                            <select
+                                value={folderMoveTarget}
+                                disabled={busy}
+                                onChange={(event) =>
+                                    setFolderMoveTarget(event.target.value)
+                                }
+                            >
+                                <option value="root">Thư mục gốc</option>
+
+                                {destinationFolders.map((folder) => (
+                                    <option
+                                        key={folder.id}
+                                        value={String(folder.id)}
+                                    >
+                                        {folder.label}
+                                    </option>
+                                ))}
+                            </select>
+                        </label>
+
+                        {error && (
+                            <p role="alert" className="message error">
+                                {error}
+                            </p>
+                        )}
+
+                        <div className="modal-footer">
+                            <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => setFolderMove(null)}
+                            >
+                                Hủy
+                            </button>
+
+                            <button
+                                type="submit"
+                                className="folders-primary"
+                                disabled={busy}
+                            >
+                                {busy ? 'Đang chuyển…' : 'Di chuyển'}
+                            </button>
+                        </div>
+                    </form>
+                </WorkspaceModal>
+            )}
+
+            {documentAction && (
+                <WorkspaceModal
+                    title={
+                        documentAction.type === 'detail'
+                            ? 'Chi tiết tài liệu'
+                            : documentAction.type === 'rename'
+                                ? 'Đổi tên file'
+                                : documentAction.type === 'ocr'
+                                    ? 'Nội dung chữ của tài liệu'
+                                    : 'Di chuyển tài liệu'
+                    }
+                    busy={busy}
+                    onClose={closeDocumentAction}
+                >
+                    {documentAction.type === 'detail' && (
+                        <div>
                             <dl>
                                 {[
                                     [
@@ -1495,12 +1899,9 @@ export default function FoldersPage({ onLogout }) {
                                     ],
                                     [
                                         'Dung lượng',
-                                        `${
-                                            (
-                                                documentAction.document.size /
-                                                1024
-                                            ).toFixed(1)
-                                        } KB`,
+                                        `${(
+                                            documentAction.document.size / 1024
+                                        ).toFixed(1)} KB`,
                                     ],
                                     [
                                         'Tải lên',
@@ -1513,119 +1914,204 @@ export default function FoldersPage({ onLogout }) {
                                 ].map(([label, value]) => (
                                     <div
                                         key={label}
-                                        style={{ marginBottom: '12px' }}
+                                        className="document-detail-field"
                                     >
                                         <dt>
                                             <strong>{label}</strong>
                                         </dt>
 
-                                        <dd
-                                            style={{
-                                                margin: 0,
-                                                whiteSpace: 'pre-wrap',
-                                            }}
-                                        >
+                                        <dd className="document-detail-value">
                                             {value || '—'}
                                         </dd>
                                     </div>
                                 ))}
                             </dl>
-                        )}
 
-                        {documentAction.type === 'ocr' && (
-                            <div>
-                                <p>
-                                    File: {documentAction.document.originalName}
+                            <details className="advanced-actions">
+                                <summary>Thao tác nâng cao</summary>
+                                <p>Xóa vĩnh viễn sẽ xóa cả bản ghi và file.</p>
+
+                                <button
+                                    type="button"
+                                    className="folders-danger"
+                                    disabled={busy}
+                                    onClick={() =>
+                                        permanentDeleteDocument(
+                                            documentAction.folderId,
+                                            documentAction.document,
+                                            true
+                                        )
+                                    }
+                                >
+                                    Xóa vĩnh viễn
+                                </button>
+                            </details>
+                        </div>
+                    )}
+
+                    {documentAction.type === 'ocr' && (
+                        <div className="document-ocr-panel">
+                            <p>
+                                File: {documentAction.document.originalName}
+                            </p>
+
+                            <p role="status" aria-live="polite">
+                                <strong>Trạng thái OCR: </strong>
+
+                                {ocrLoading && documentAction.mode === 'run'
+                                    ? 'Đang nhận dạng…'
+                                    : ocrStatusName(
+                                        documentAction.document.ocrStatus
+                                    )}
+                            </p>
+
+                            {ocrLoading && (
+                                <p role="status">
+                                    {documentAction.mode === 'run'
+                                        ? 'Đang nhận dạng chữ, vui lòng chờ…'
+                                        : 'Đang lấy nội dung và trạng thái OCR…'}
                                 </p>
+                            )}
 
-                                <p role="status" aria-live="polite">
-                                    <strong>Trạng thái OCR: </strong>
-
-                                    {ocrLoading && documentAction.mode === 'run'
-                                        ? 'Đang nhận dạng…'
-                                        : ocrStatusName(
-                                            documentAction.document.ocrStatus
-                                        )}
-                                </p>
-
-                                {ocrLoading && (
-                                    <p role="status">
-                                        {documentAction.mode === 'run'
-                                            ? 'Đang nhận dạng chữ, vui lòng chờ…'
-                                            : 'Đang lấy nội dung và trạng thái OCR…'}
+                            {documentAction.document.ocrStatus === 'FAILED' &&
+                                documentAction.document.ocrError && (
+                                    <p className="message error" role="alert">
+                                        <strong>Lỗi OCR: </strong>
+                                        {documentAction.document.ocrError}
                                     </p>
                                 )}
 
-                                {/* Lỗi OCR đã lưu trong database. */}
-                                {documentAction.document.ocrStatus === 'FAILED' &&
-                                    documentAction.document.ocrError && (
-                                        <p
-                                            className="message error"
-                                            role="alert"
-                                            style={{ whiteSpace: 'pre-wrap' }}
-                                        >
-                                            <strong>Lỗi OCR: </strong>
-                                            {documentAction.document.ocrError}
-                                        </p>
+                            {ocrError &&
+                                ocrError !== documentAction.document.ocrError && (
+                                    <p className="message error" role="alert">
+                                        {ocrError}
+                                    </p>
+                                )}
+
+                            {!ocrLoading && ocrTextLoaded && (
+                                <>
+                                    {documentAction.highlightKeyword && (
+                                        <>
+                                            <p>
+                                                Từ khóa:{' '}
+                                                <strong>
+                                                    {documentAction.highlightKeyword}
+                                                </strong>
+                                            </p>
+
+                                            <OcrTextViewer
+                                                key={`${documentAction.document.id}:${documentAction.highlightKeyword}`}
+                                                text={ocrText}
+                                                keyword={
+                                                    documentAction.highlightKeyword
+                                                }
+                                            />
+                                        </>
                                     )}
 
-                                {/* Không hiển thị trùng với lỗi đã lưu. */}
-                                {ocrError &&
-                                    ocrError !== documentAction.document.ocrError && (
-                                        <p
-                                            className="message error"
-                                            role="alert"
-                                            style={{ whiteSpace: 'pre-wrap' }}
-                                        >
-                                            {ocrError}
-                                        </p>
-                                    )}
+                                    <details
+                                        open={
+                                            documentAction.highlightKeyword
+                                                ? undefined
+                                                : true
+                                        }
+                                    >
+                                        <summary>
+                                            Chỉnh sửa nội dung OCR
+                                        </summary>
 
-                                {!ocrLoading && ocrText.trim() && (
-                                    <>
                                         <label htmlFor="document-ocr-text">
-                                            Nội dung văn bản đã lưu
+                                            Nội dung OCR — có thể chỉnh sửa
                                         </label>
 
                                         <textarea
                                             id="document-ocr-text"
-                                            readOnly
                                             value={ocrText}
-                                            style={{
-                                                width: '100%',
-                                                minHeight: '320px',
-                                                boxSizing: 'border-box',
-                                                margin: '12px 0',
-                                                padding: '12px',
-                                                resize: 'vertical',
-                                                lineHeight: 1.6,
+                                            rows={16}
+                                            disabled={
+                                                busy ||
+                                                ocrSaving ||
+                                                documentAction.document
+                                                    .ocrStatus === 'PROCESSING'
+                                            }
+                                            onChange={(event) => {
+                                                setOcrText(event.target.value);
+                                                setOcrSaveError('');
+                                                setOcrSaveSuccess('');
                                             }}
+                                            className="ocr-result-text"
                                         />
-                                    </>
-                                )}
+                                    </details>
 
-                                {!ocrLoading && !ocrError && !ocrText.trim() && (
-                                    <p>
-                                        {documentAction.document.ocrStatus === 'FAILED'
-                                            ? 'Lần nhận dạng gần nhất thất bại. Bạn có thể chạy lại OCR.'
-                                            : documentAction.document.ocrStatus === 'PROCESSING'
-                                                ? 'Tài liệu đang được xử lý. Bấm cập nhật để xem trạng thái mới.'
-                                                : 'Chưa có nội dung chữ được lưu.'}
+                                    <p role="status" aria-live="polite">
+                                        {ocrDirty
+                                            ? 'Có thay đổi chưa lưu.'
+                                            : 'Nội dung hiện tại đã được lưu.'}
                                     </p>
-                                )}
 
-                                {!ocrLoading && ocrError &&
-                                    documentAction.document.ocrStatus !== 'PROCESSING' && (
-                                        <button
-                                            type="button"
-                                            disabled={busy}
-                                            onClick={retryDocumentText}
+                                    {ocrSaveError && (
+                                        <p
+                                            className="message error"
+                                            role="alert"
                                         >
-                                            Thử lại
-                                        </button>
+                                            {ocrSaveError}
+                                        </p>
                                     )}
 
-                                {documentAction.document.ocrStatus === 'PROCESSING' && (
+                                    {ocrSaveSuccess && (
+                                        <p
+                                            className="message success"
+                                            role="status"
+                                        >
+                                            {ocrSaveSuccess}
+                                        </p>
+                                    )}
+
+                                    <button
+                                        type="button"
+                                        className="folders-primary"
+                                        disabled={
+                                            busy ||
+                                            ocrSaving ||
+                                            !ocrDirty ||
+                                            documentAction.document
+                                                .ocrStatus === 'PROCESSING'
+                                        }
+                                        onClick={saveDocumentText}
+                                    >
+                                        {ocrSaving
+                                            ? 'Đang lưu…'
+                                            : 'Lưu nội dung'}
+                                    </button>
+                                </>
+                            )}
+
+                            {!ocrLoading && !ocrError && !ocrText.trim() && (
+                                <p>
+                                    {documentAction.document.ocrStatus === 'FAILED'
+                                        ? 'Lần nhận dạng gần nhất thất bại. Bạn có thể chạy lại OCR.'
+                                        : documentAction.document.ocrStatus ===
+                                        'PROCESSING'
+                                            ? 'Tài liệu đang được xử lý. Bấm cập nhật để xem trạng thái mới.'
+                                            : 'Nội dung chữ đang trống. Bạn có thể nhập nội dung và lưu lại.'}
+                                </p>
+                            )}
+
+                            {!ocrLoading &&
+                                ocrError &&
+                                documentAction.document.ocrStatus !==
+                                'PROCESSING' && (
+                                    <button
+                                        type="button"
+                                        disabled={busy}
+                                        onClick={retryDocumentText}
+                                    >
+                                        Thử lại
+                                    </button>
+                                )}
+
+                            {documentAction.document.ocrStatus ===
+                                'PROCESSING' && (
                                     <button
                                         type="button"
                                         disabled={busy || ocrLoading}
@@ -1633,7 +2119,8 @@ export default function FoldersPage({ onLogout }) {
                                             loadDocumentText(
                                                 documentAction.folderId,
                                                 documentAction.document,
-                                                false
+                                                false,
+                                                documentAction.highlightKeyword ?? ''
                                             )
                                         }
                                     >
@@ -1641,270 +2128,810 @@ export default function FoldersPage({ onLogout }) {
                                     </button>
                                 )}
 
-                                {canRunOcr(documentAction.document) && (
-                                    <button
-                                        type="button"
-                                        className="folders-primary"
-                                        disabled={
-                                            busy ||
-                                            ocrLoading ||
-                                            documentAction.document.ocrStatus === 'PROCESSING'
-                                        }
-                                        onClick={rerunDocumentOcr}
-                                        style={{ margin: '12px 0' }}
-                                    >
-                                        {ocrLoading && documentAction.mode === 'run'
-                                            ? 'Đang nhận dạng…'
-                                            : documentAction.document.ocrStatus === 'PROCESSING'
-                                                ? 'Đang xử lý OCR'
-                                                : documentAction.document.ocrStatus === 'FAILED'
-                                                    ? 'Chạy lại OCR'
-                                                    : documentAction.document.ocrStatus === 'COMPLETED'
-                                                        ? 'Nhận dạng lại'
-                                                        : 'Nhận dạng chữ'}
-                                    </button>
-                                )}
-                            </div>
-                        )}
-
-                        {documentAction.type === 'rename' && (
-                            <form
-                                className="folders-form"
-                                onSubmit={saveDocumentName}
-                            >
-                                <label htmlFor="document-new-name">
-                                    Tên file mới
-                                </label>
-
-                                <input
-                                    autoFocus
-                                    id="document-new-name"
-                                    value={documentName}
-                                    maxLength={255}
-                                    required
-                                    disabled={busy}
-                                    onChange={(event) =>
-                                        setDocumentName(event.target.value)
-                                    }
-                                />
-
-                                <p>
-                                    Giữ nguyên đuôi file,
-                                    ví dụ: BaoCaoMoi.pdf.
-                                </p>
-
+                            {canRunOcr(documentAction.document) && (
                                 <button
-                                    type="submit"
-                                    disabled={busy}
+                                    type="button"
                                     className="folders-primary"
-                                >
-                                    {busy
-                                        ? 'Đang lưu...'
-                                        : 'Lưu tên mới'}
-                                </button>
-                            </form>
-                        )}
-
-                        {documentAction.type === 'move' && (
-                            <form
-                                className="folders-form"
-                                onSubmit={saveDocumentMove}
-                            >
-                                <p>
-                                    File:{' '}
-                                    {documentAction.document.originalName}
-                                </p>
-
-                                <label htmlFor="document-target-folder">
-                                    Thư mục đích
-                                </label>
-
-                                <select
-                                    autoFocus
-                                    id="document-target-folder"
-                                    value={targetFolderId}
-                                    required
                                     disabled={
                                         busy ||
-                                        destinationFolders.length === 0
+                                        ocrLoading ||
+                                        documentAction.document.ocrStatus ===
+                                        'PROCESSING'
                                     }
-                                    onChange={(event) =>
-                                        setTargetFolderId(event.target.value)
-                                    }
+                                    onClick={rerunDocumentOcr}
                                 >
-                                    <option value="">
-                                        Chọn thư mục
-                                    </option>
-
-                                    {destinationFolders.map((folder) => (
-                                        <option
-                                            key={folder.id}
-                                            value={folder.id}
-                                        >
-                                            {folder.label}
-                                        </option>
-                                    ))}
-                                </select>
-
-                                {destinationFolders.length === 0 && (
-                                    <p>
-                                        Chưa có thư mục khác.
-                                        Tạo một thư mục trước khi di chuyển.
-                                    </p>
-                                )}
-
-                                <button
-                                    type="submit"
-                                    className="folders-primary"
-                                    disabled={busy || !targetFolderId}
-                                >
-                                    {busy
-                                        ? 'Đang chuyển...'
-                                        : 'Xác nhận di chuyển'}
+                                    {ocrLoading && documentAction.mode === 'run'
+                                        ? 'Đang nhận dạng…'
+                                        : documentAction.document.ocrStatus ===
+                                        'PROCESSING'
+                                            ? 'Đang xử lý OCR'
+                                            : documentAction.document.ocrStatus ===
+                                            'FAILED'
+                                                ? 'Chạy lại OCR'
+                                                : documentAction.document.ocrStatus ===
+                                                'COMPLETED'
+                                                    ? 'Nhận dạng lại'
+                                                    : 'Nhận dạng chữ'}
                                 </button>
-                            </form>
-                        )}
+                            )}
+                        </div>
+                    )}
 
-                        {error && (
-                            <p className="message error" role="alert">
-                                {error}
-                            </p>
-                        )}
-
-                        <button
-                            type="button"
-                            autoFocus={
-                                ['detail', 'ocr'].includes(documentAction.type)
-                            }
-                            disabled={busy}
-                            onClick={closeDocumentAction}
+                    {documentAction.type === 'rename' && (
+                        <form
+                            className="folders-form"
+                            onSubmit={saveDocumentName}
                         >
-                            {['detail', 'ocr'].includes(documentAction.type)
-                                ? 'Đóng'
-                                : 'Hủy'}
-                        </button>
-                    </section>
-                </div>
+                            <label htmlFor="document-new-name">
+                                Tên file mới
+                            </label>
+
+                            <input
+                                autoFocus
+                                id="document-new-name"
+                                value={documentName}
+                                maxLength={255}
+                                required
+                                disabled={busy}
+                                onChange={(event) =>
+                                    setDocumentName(event.target.value)
+                                }
+                            />
+
+                            <p>
+                                Giữ nguyên đuôi file, ví dụ: BaoCaoMoi.pdf.
+                            </p>
+
+                            <button
+                                type="submit"
+                                disabled={busy}
+                                className="folders-primary"
+                            >
+                                {busy ? 'Đang lưu...' : 'Lưu tên mới'}
+                            </button>
+                        </form>
+                    )}
+
+                    {documentAction.type === 'move' && (
+                        <form
+                            className="folders-form"
+                            onSubmit={saveDocumentMove}
+                        >
+                            <p>
+                                File: {documentAction.document.originalName}
+                            </p>
+
+                            <label htmlFor="document-target-folder">
+                                Thư mục đích
+                            </label>
+
+                            <select
+                                autoFocus
+                                id="document-target-folder"
+                                value={targetFolderId}
+                                required
+                                disabled={
+                                    busy || destinationFolders.length === 0
+                                }
+                                onChange={(event) =>
+                                    setTargetFolderId(event.target.value)
+                                }
+                            >
+                                <option value="">Chọn thư mục</option>
+
+                                {destinationFolders.map((folder) => (
+                                    <option
+                                        key={folder.id}
+                                        value={folder.id}
+                                    >
+                                        {folder.label}
+                                    </option>
+                                ))}
+                            </select>
+
+                            {destinationFolders.length === 0 && (
+                                <p>
+                                    Chưa có thư mục khác. Tạo một thư mục
+                                    trước khi di chuyển.
+                                </p>
+                            )}
+
+                            <button
+                                type="submit"
+                                className="folders-primary"
+                                disabled={busy || !targetFolderId}
+                            >
+                                {busy
+                                    ? 'Đang chuyển...'
+                                    : 'Xác nhận di chuyển'}
+                            </button>
+                        </form>
+                    )}
+
+                    {error && (
+                        <p className="message error" role="alert">
+                            {error}
+                        </p>
+                    )}
+
+                    <button
+                        type="button"
+                        autoFocus={['detail', 'ocr'].includes(
+                            documentAction.type
+                        )}
+                        disabled={busy}
+                        onClick={closeDocumentAction}
+                    >
+                        {['detail', 'ocr'].includes(documentAction.type)
+                            ? 'Đóng'
+                            : 'Hủy'}
+                    </button>
+                </WorkspaceModal>
             )}
 
             {preview && (
-                <div
-                    onKeyDown={(event) => {
-                        if (event.key === 'Escape') {
-                            setPreview(null);
-                        }
-                    }}
-                    style={{
-                        position: 'fixed',
-                        inset: 0,
-                        zIndex: 1000,
-                        background: 'rgba(0,0,0,0.55)',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        padding: '20px',
-                    }}
-                >
-                    <section
-                        role="dialog"
-                        aria-modal="true"
-                        aria-labelledby="document-preview-title"
-                        style={{
-                            width: 'min(1100px, 100%)',
-                            height: '85vh',
-                            background: '#fff',
-                            borderRadius: '12px',
-                            padding: '16px',
-                            display: 'flex',
-                            flexDirection: 'column',
-                            boxSizing: 'border-box',
-                        }}
-                    >
-                        <div
-                            style={{
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'space-between',
-                                gap: '12px',
-                                marginBottom: '12px',
-                            }}
-                        >
-                            <h2
-                                id="document-preview-title"
-                                style={{
-                                    margin: 0,
-                                    overflowWrap: 'anywhere',
-                                }}
-                            >
-                                {preview.title}
-                            </h2>
-
-                            <div
-                                style={{
-                                    display: 'flex',
-                                    gap: '12px',
-                                    alignItems: 'center',
-                                    flexShrink: 0,
-                                }}
-                            >
-                                <a
-                                    href={preview.url}
-                                    download={preview.originalName}
-                                >
-                                    Tải xuống
-                                </a>
-
-                                <button
-                                    autoFocus
-                                    type="button"
-                                    onClick={() => setPreview(null)}
-                                >
-                                    Đóng
-                                </button>
-                            </div>
-                        </div>
-
-                        <div
-                            style={{
-                                flex: 1,
-                                minHeight: 0,
-                                overflow: 'auto',
-                            }}
-                        >
-                            {['image/jpeg', 'image/png'].includes(
-                                preview.mimeType
-                            ) ? (
-                                <img
-                                    src={preview.url}
-                                    alt={preview.title}
-                                    style={{
-                                        display: 'block',
-                                        maxWidth: '100%',
-                                        maxHeight: '100%',
-                                        objectFit: 'contain',
-                                        margin: '0 auto',
-                                    }}
-                                />
-                            ) : preview.mimeType === 'application/pdf' ? (
-                                <iframe
-                                    src={preview.url}
-                                    title={preview.title}
-                                    style={{
-                                        width: '100%',
-                                        height: '100%',
-                                        border: 0,
-                                    }}
-                                />
-                            ) : (
-                                <p>
-                                    File Word chưa hỗ trợ xem trực tiếp.
-                                    Bấm “Tải xuống” để mở bằng Word.
-                                </p>
-                            )}
-                        </div>
-                    </section>
-                </div>
+                <DocumentPreview
+                    key={`${preview.folderId}:${preview.document.id}:${preview.highlightKeyword}`}
+                    folderId={preview.folderId}
+                    document={preview.document}
+                    highlightKeyword={preview.highlightKeyword}
+                    onClose={() => setPreview(null)}
+                />
             )}
         </main>
+    );
+}
+
+function DocumentSearchPanel({
+                                 folderId,
+                                 reload,
+                                 disabled,
+                                 selectedDocumentId,
+                                 onOpenDocument,
+                                 onDetailDocument,
+                                 onRenameDocument,
+                                 onMoveDocument,
+                                 onDeleteDocument,
+                                 onPermanentDeleteDocument,
+                                 onDownloadDocument,
+                                 onRunDocumentOcr,
+                                 onShowDocumentText,
+                             }) {
+    const emptyFilters = () => ({
+        keyword: '',
+        ocrKeyword: '',
+        documentNumber: '',
+        documentType: '',
+        issuer: '',
+        issuedDateFrom: '',
+        issuedDateTo: '',
+        currentFolderOnly: folderId != null,
+    });
+
+    const searchStorageKey =
+        `${SEARCH_VIEW_PREFIX}${folderId ?? 'root'}`;
+
+    const [savedSearch] = useState(() => {
+        const saved = readSessionValue(searchStorageKey);
+        const defaults = emptyFilters();
+
+        function restoreFilters(value) {
+            return Object.fromEntries(
+                Object.entries(defaults).map(([key, fallback]) => [
+                    key,
+                    typeof value?.[key] === typeof fallback
+                        ? value[key]
+                        : fallback,
+                ])
+            );
+        }
+
+        return {
+            filters: restoreFilters(saved?.filters),
+            query: {
+                ...restoreFilters(saved?.query),
+                page:
+                    Number.isInteger(saved?.query?.page) &&
+                    saved.query.page >= 0
+                        ? saved.query.page
+                        : 0,
+                size: [10, 20, 50, 100].includes(saved?.query?.size)
+                    ? saved.query.size
+                    : 10,
+            },
+        };
+    });
+
+    const [filters, setFilters] = useState(savedSearch.filters);
+    const [query, setQuery] = useState(savedSearch.query);
+
+    const [result, setResult] = useState({
+        items: [],
+        page: 0,
+        size: 10,
+        totalElements: 0,
+        totalPages: 0,
+    });
+
+    const [searchLoading, setSearchLoading] = useState(true);
+    const [searchError, setSearchError] = useState('');
+    const [retry, setRetry] = useState(0);
+
+    useEffect(() => {
+        writeSessionValue(searchStorageKey, {
+            filters,
+            query,
+        });
+    }, [searchStorageKey, filters, query]);
+
+    useEffect(() => {
+        let active = true;
+        setSearchLoading(true);
+        setSearchError('');
+
+        async function load() {
+            try {
+                const data = await api.searchDocuments({
+                    ...query,
+                    folderId: query.currentFolderOnly ? folderId : null,
+                });
+
+                if (!active) {
+                    return;
+                }
+
+                if (!data || !Array.isArray(data.items)) {
+                    throw new Error(
+                        'API tìm kiếm chưa trả về danh sách tài liệu hợp lệ.'
+                    );
+                }
+
+                const lastPage = Math.max(0, data.totalPages - 1);
+
+                if (query.page > lastPage) {
+                    setQuery((previous) => ({
+                        ...previous,
+                        page: lastPage,
+                    }));
+                    return;
+                }
+
+                setResult(data);
+            } catch (err) {
+                if (active) {
+                    setSearchError(
+                        err.message || 'Không thể tìm tài liệu.'
+                    );
+                }
+            } finally {
+                if (active) {
+                    setSearchLoading(false);
+                }
+            }
+        }
+
+        load();
+
+        return () => {
+            active = false;
+        };
+    }, [folderId, query, reload, retry]);
+
+    function submit(event) {
+        event.preventDefault();
+
+        if (disabled || searchLoading) {
+            return;
+        }
+
+        setSearchLoading(true);
+
+        setQuery({
+            ...filters,
+            page: 0,
+            size: query.size,
+        });
+    }
+
+    function reset() {
+        if (disabled || searchLoading) {
+            return;
+        }
+
+        const next = emptyFilters();
+
+        setFilters(next);
+        setSearchLoading(true);
+
+        setQuery({
+            ...next,
+            page: 0,
+            size: query.size,
+        });
+    }
+
+    const blocked = disabled || searchLoading;
+
+    const gridStyle = {
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+        gap: 12,
+    };
+
+    const inputStyle = {
+        width: '100%',
+        boxSizing: 'border-box',
+        padding: '8px 10px',
+        marginTop: 5,
+    };
+
+    const cellStyle = {
+        padding: '10px 12px',
+        textAlign: 'left',
+        borderBottom: '1px solid #e5e7eb',
+    };
+
+    return (
+        <section
+            aria-label="Tìm kiếm tài liệu"
+            style={{ margin: '16px 0 24px' }}
+        >
+            <h2>Tài liệu</h2>
+
+            <form onSubmit={submit}>
+                <fieldset
+                    disabled={blocked}
+                    style={{
+                        border: '1px solid #dbe1ea',
+                        borderRadius: 8,
+                        padding: 14,
+                    }}
+                >
+                    <legend>Tìm kiếm và bộ lọc</legend>
+
+                    <div style={gridStyle}>
+                        <label>
+                            Tên hoặc metadata
+                            <input
+                                style={inputStyle}
+                                value={filters.keyword}
+                                maxLength={255}
+                                placeholder="Tên file, tiêu đề, từ khóa…"
+                                onChange={(event) =>
+                                    setFilters((previous) => ({
+                                        ...previous,
+                                        keyword: event.target.value,
+                                    }))
+                                }
+                            />
+                        </label>
+
+                        <label>
+                            Nội dung OCR
+                            <input
+                                style={inputStyle}
+                                value={filters.ocrKeyword}
+                                maxLength={255}
+                                placeholder="Từ hoặc cụm từ trong nội dung"
+                                onChange={(event) =>
+                                    setFilters((previous) => ({
+                                        ...previous,
+                                        ocrKeyword: event.target.value,
+                                    }))
+                                }
+                            />
+                        </label>
+                    </div>
+
+                    <details style={{ marginTop: 12 }}>
+                        <summary style={{ cursor: 'pointer' }}>
+                            Bộ lọc bổ sung
+                        </summary>
+
+                        <div style={{ ...gridStyle, marginTop: 12 }}>
+                            {[
+                                ['documentNumber', 'Số văn bản', 'text'],
+                                [
+                                    'documentType',
+                                    'Loại văn bản (nhập đúng loại đã lưu)',
+                                    'text',
+                                ],
+                                ['issuer', 'Cơ quan ban hành', 'text'],
+                                ['issuedDateFrom', 'Ban hành từ ngày', 'date'],
+                                ['issuedDateTo', 'Đến ngày', 'date'],
+                            ].map(([key, label, type]) => (
+                                <label key={key}>
+                                    {label}
+
+                                    <input
+                                        style={inputStyle}
+                                        type={type}
+                                        value={filters[key]}
+                                        maxLength={255}
+                                        min={
+                                            key === 'issuedDateTo'
+                                                ? filters.issuedDateFrom ||
+                                                undefined
+                                                : undefined
+                                        }
+                                        max={
+                                            key === 'issuedDateFrom'
+                                                ? filters.issuedDateTo ||
+                                                undefined
+                                                : undefined
+                                        }
+                                        onChange={(event) =>
+                                            setFilters((previous) => ({
+                                                ...previous,
+                                                [key]: event.target.value,
+                                            }))
+                                        }
+                                    />
+                                </label>
+                            ))}
+                        </div>
+                    </details>
+
+                    <div
+                        style={{
+                            display: 'flex',
+                            flexWrap: 'wrap',
+                            alignItems: 'center',
+                            gap: 12,
+                            marginTop: 14,
+                        }}
+                    >
+                        {folderId != null && (
+                            <label
+                                style={{
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: 6,
+                                }}
+                            >
+                                <input
+                                    type="checkbox"
+                                    checked={filters.currentFolderOnly}
+                                    onChange={(event) =>
+                                        setFilters((previous) => ({
+                                            ...previous,
+                                            currentFolderOnly:
+                                            event.target.checked,
+                                        }))
+                                    }
+                                />
+
+                                Chỉ trong thư mục đang mở
+                            </label>
+                        )}
+
+                        <button
+                            type="submit"
+                            className="folders-primary"
+                        >
+                            Tìm kiếm
+                        </button>
+
+                        <button type="button" onClick={reset}>
+                            Xóa bộ lọc
+                        </button>
+                    </div>
+                </fieldset>
+            </form>
+
+            {searchLoading && (
+                <p role="status">Đang tải tài liệu…</p>
+            )}
+
+            {searchError && (
+                <div className="message error" role="alert">
+                    <p>{searchError}</p>
+
+                    <button
+                        type="button"
+                        disabled={blocked}
+                        onClick={() => setRetry((value) => value + 1)}
+                    >
+                        Thử lại
+                    </button>
+                </div>
+            )}
+
+            {!searchLoading && !searchError && (
+                <>
+                    <p role="status">
+                        {result.totalElements} tài liệu ·{' '}
+                        {query.currentFolderOnly
+                            ? 'Trong thư mục đang mở'
+                            : 'Trong tất cả thư mục được phép truy cập'}
+                    </p>
+
+                    {result.items.length === 0 ? (
+                        <p>Không có tài liệu phù hợp.</p>
+                    ) : (
+                        <div style={{ overflowX: 'auto' }}>
+                            <table
+                                style={{
+                                    width: '100%',
+                                    borderCollapse: 'collapse',
+                                }}
+                            >
+                                <thead>
+                                <tr>
+                                    {[
+                                        'Tên tài liệu',
+                                        'Số văn bản',
+                                        'Loại văn bản',
+                                        'Ngày ban hành',
+                                        'OCR',
+                                        'Thao tác',
+                                    ].map((label) => (
+                                        <th
+                                            key={label}
+                                            scope="col"
+                                            style={cellStyle}
+                                        >
+                                            {label}
+                                        </th>
+                                    ))}
+                                </tr>
+                                </thead>
+
+                                <tbody>
+                                {result.items.map((document) => {
+                                    const documentFolderId =
+                                        document.folderId;
+
+                                    const canOcr =
+                                        document.mimeType?.startsWith(
+                                            'image/'
+                                        ) ||
+                                        document.mimeType ===
+                                        'application/pdf';
+
+                                    const act = (handler) => () => {
+                                        if (blocked) {
+                                            return;
+                                        }
+
+                                        const keyword =
+                                            query.ocrKeyword?.trim() ?? '';
+
+                                        if (
+                                            handler === onOpenDocument ||
+                                            handler === onShowDocumentText
+                                        ) {
+                                            return handler(
+                                                documentFolderId,
+                                                document,
+                                                keyword
+                                            );
+                                        }
+
+                                        return handler(
+                                            documentFolderId,
+                                            document
+                                        );
+                                    };
+
+                                    const menuItems = [
+                                        {
+                                            label: 'Xem file',
+                                            onClick: act(onOpenDocument),
+                                        },
+                                        {
+                                            label: 'Chi tiết',
+                                            onClick: act(onDetailDocument),
+                                        },
+                                        {
+                                            label: 'Đổi tên file',
+                                            onClick: act(onRenameDocument),
+                                        },
+                                        {
+                                            label: 'Di chuyển',
+                                            onClick: act(onMoveDocument),
+                                        },
+                                        {
+                                            label: 'Tải xuống',
+                                            onClick: act(onDownloadDocument),
+                                        },
+                                        {
+                                            label: 'Xem / sửa nội dung OCR',
+                                            onClick: act(onShowDocumentText),
+                                        },
+                                        ...(canOcr &&
+                                        document.ocrStatus !== 'PROCESSING'
+                                            ? [
+                                                {
+                                                    label: 'Chạy OCR',
+                                                    onClick: act(
+                                                        onRunDocumentOcr
+                                                    ),
+                                                },
+                                            ]
+                                            : []),
+                                        {
+                                            label: 'Xóa mềm',
+                                            danger: true,
+                                            onClick: act(onDeleteDocument),
+                                        },
+                                        {
+                                            label: 'Xóa vĩnh viễn',
+                                            danger: true,
+                                            onClick: act(
+                                                onPermanentDeleteDocument
+                                            ),
+                                        },
+                                    ];
+
+                                    return (
+                                        <tr
+                                            key={document.id}
+                                            style={
+                                                document.id ===
+                                                selectedDocumentId
+                                                    ? {
+                                                        background: '#eff6ff',
+                                                    }
+                                                    : undefined
+                                            }
+                                            onDoubleClick={() => {
+                                                if (!blocked) {
+                                                    onDetailDocument(
+                                                        documentFolderId,
+                                                        document
+                                                    );
+                                                }
+                                            }}
+                                        >
+                                            <td style={cellStyle}>
+                                                <button
+                                                    type="button"
+                                                    disabled={blocked}
+                                                    onClick={act(
+                                                        onOpenDocument
+                                                    )}
+                                                    style={{
+                                                        textAlign: 'left',
+                                                        overflowWrap: 'anywhere',
+                                                    }}
+                                                >
+                                                    {document.title ||
+                                                        document.originalName}
+                                                </button>
+
+                                                {document.title && (
+                                                    <div
+                                                        style={{
+                                                            fontSize: 12,
+                                                            color: '#64748b',
+                                                            marginTop: 4,
+                                                            overflowWrap:
+                                                                'anywhere',
+                                                        }}
+                                                    >
+                                                        {document.originalName}
+                                                    </div>
+                                                )}
+                                            </td>
+
+                                            <td style={cellStyle}>
+                                                {document.documentNumber ||
+                                                    '—'}
+                                            </td>
+
+                                            <td style={cellStyle}>
+                                                {document.documentType ||
+                                                    '—'}
+                                            </td>
+
+                                            <td style={cellStyle}>
+                                                {document.issuedDate
+                                                    ? document.issuedDate
+                                                        .split('-')
+                                                        .reverse()
+                                                        .join('/')
+                                                    : '—'}
+                                            </td>
+
+                                            <td style={cellStyle}>
+                                                {ocrStatusName(
+                                                    document.ocrStatus
+                                                )}
+                                            </td>
+
+                                            <td style={cellStyle}>
+                                                <WorkspaceMenu
+                                                    label={`Thao tác tài liệu ${document.originalName}`}
+                                                    disabled={blocked}
+                                                    items={menuItems}
+                                                />
+                                            </td>
+                                        </tr>
+                                    );
+                                })}
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
+
+                    <nav
+                        aria-label="Phân trang tài liệu"
+                        style={{
+                            display: 'flex',
+                            flexWrap: 'wrap',
+                            alignItems: 'center',
+                            gap: 12,
+                            marginTop: 14,
+                        }}
+                    >
+                        <button
+                            type="button"
+                            disabled={blocked || result.page <= 0}
+                            onClick={() => {
+                                setSearchLoading(true);
+
+                                setQuery((previous) => ({
+                                    ...previous,
+                                    page: previous.page - 1,
+                                }));
+                            }}
+                        >
+                            ← Trang trước
+                        </button>
+
+                        <span>
+                            Trang{' '}
+                            {result.totalPages === 0 ? 0 : result.page + 1}
+                            {' / '}
+                            {result.totalPages}
+                        </span>
+
+                        <button
+                            type="button"
+                            disabled={
+                                blocked ||
+                                result.page + 1 >= result.totalPages
+                            }
+                            onClick={() => {
+                                setSearchLoading(true);
+
+                                setQuery((previous) => ({
+                                    ...previous,
+                                    page: previous.page + 1,
+                                }));
+                            }}
+                        >
+                            Trang sau →
+                        </button>
+
+                        <label>
+                            Mỗi trang{' '}
+                            <select
+                                value={query.size}
+                                disabled={blocked}
+                                onChange={(event) => {
+                                    const size = Number(event.target.value);
+
+                                    setSearchLoading(true);
+
+                                    setQuery((previous) => ({
+                                        ...previous,
+                                        size,
+                                        page: 0,
+                                    }));
+                                }}
+                            >
+                                {[10, 20, 50, 100].map((size) => (
+                                    <option key={size} value={size}>
+                                        {size}
+                                    </option>
+                                ))}
+                            </select>
+                        </label>
+                    </nav>
+                </>
+            )}
+        </section>
     );
 }

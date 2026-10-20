@@ -1,329 +1,179 @@
 import { useEffect, useState } from 'react';
 import { api } from './api.js';
-import FolderCreateForm from './FolderCreateForm.jsx';
+import InlineFolderForm from './InlineFolderForm.jsx';
+import WorkspaceMenu from './WorkspaceMenu.jsx';
 
 export default function FolderTreeNode({
                                            folder,
                                            interaction,
-                                           foldersReload = 0,
+                                           reload,
+                                           ancestorIds = [],
                                        }) {
     const [expanded, setExpanded] = useState(false);
     const [children, setChildren] = useState([]);
-    const [documents, setDocuments] = useState([]);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
     const [retry, setRetry] = useState(0);
-    const [showCreate, setShowCreate] = useState(false);
-
-    const documentsReload = interaction.documentsReload;
-    const createRequest = interaction.createRequest;
-
-    const documentDisabled = Boolean(
-        interaction.documentDisabled ?? interaction.disabled
-    );
-
-    // Mở các nhánh dẫn đến thư mục mà nút bên phải yêu cầu tạo.
+    const request = interaction.createRequest;
+    const creating = request?.folderId === folder.id;
+    const selected = interaction.selectedFolderId === folder.id;
+    const ids = [...ancestorIds, folder.id];
     useEffect(() => {
-        if (!createRequest) return;
-
-        const isTarget = createRequest.folderId === folder.id;
-
-        const isAncestor = createRequest.ancestorIds.includes(
-            folder.id
-        );
-
-        if (isTarget || isAncestor) {
+        if (
+            request &&
+            (request.folderId === folder.id || request.ancestorIds?.includes(folder.id))
+        ) {
             setExpanded(true);
         }
-
-        setShowCreate(isTarget);
-    }, [createRequest, folder.id]);
-
+    }, [request, folder.id]);
+    useEffect(() => {
+        if (interaction.selectedAncestorIds?.includes(folder.id)) {
+            setExpanded(true);
+        }
+    }, [interaction.selectedAncestorIds, folder.id]);
     useEffect(() => {
         if (!expanded) {
             return;
         }
-
         let active = true;
-
-        async function loadContents() {
-            setLoading(true);
-            setError('');
-
-            try {
-                const [folderData, documentData] = await Promise.all([
-                    api.folders(folder.id),
-                    api.documents(folder.id),
-                ]);
-
-                if (active) {
-                    setChildren(folderData);
-                    setDocuments(documentData);
+        setLoading(true);
+        setError('');
+        api.folders(folder.id)
+            .then((data) => {
+                if (!Array.isArray(data)) {
+                    throw new Error('Danh sách thư mục không hợp lệ.');
                 }
-            } catch (err) {
+                if (active) {
+                    setChildren(data);
+                }
+            })
+            .catch((err) => {
                 if (active) {
                     setError(err.message);
                 }
-            } finally {
+            })
+            .finally(() => {
                 if (active) {
                     setLoading(false);
                 }
-            }
-        }
-
-        loadContents();
-
+            });
         return () => {
             active = false;
         };
-    }, [
-        expanded,
-        folder.id,
-        documentsReload,
-        foldersReload,
-        retry,
-    ]);
-
-    function toggle() {
-        if (interaction.disabled) {
-            return;
-        }
-
-        setExpanded((previous) => !previous);
-    }
-
-    function openFolder() {
-        if (interaction.disabled) {
-            return;
-        }
-
-        setExpanded(true);
-        interaction.onOpen(folder);
-    }
-
-    function startCreateChild(event) {
-        event.stopPropagation();
-
-        if (interaction.disabled) {
-            return;
-        }
-
-        interaction.onClearCreateRequest();
-        setExpanded(true);
-        setShowCreate(true);
-    }
-
-    function closeCreate() {
-        setShowCreate(false);
-        interaction.onClearCreateRequest();
-    }
-
-    async function createChild(name) {
-        await interaction.onCreateFolder(name, folder.id);
-    }
-
-    function selectDocument(event, document) {
-        event.stopPropagation();
-
-        if (documentDisabled) {
-            return;
-        }
-
-        interaction.onSelectDocument(folder.id, document);
-    }
-
-    function openDocument(event, document) {
-        event.stopPropagation();
-
-        if (documentDisabled) {
-            return;
-        }
-
-        interaction.onOpenDocument(folder.id, document);
-    }
-
-    const isDragging = interaction.draggedFolderId === folder.id;
-    const isDropTarget = interaction.dropTarget === String(folder.id);
-    const isSelected = interaction.selectedFolderId === folder.id;
-
+    }, [expanded, folder.id, reload, retry]);
     return (
-        <div>
+        <li>
             <div
-                draggable={
-                    !interaction.disabled &&
-                    !loading &&
-                    !showCreate
-                }
-                onDragStart={(event) =>
-                    interaction.onDragStart(event, folder)
-                }
+                className={`tree-row ${selected ? 'selected' : ''} ${interaction.dropTarget === String(folder.id) ? 'drop-target' : ''}`}
+                draggable={!interaction.disabled}
+                onDragStart={(event) => interaction.onDragStart(event, folder)}
                 onDragEnd={interaction.onDragEnd}
-                onDragOver={(event) =>
-                    interaction.onDragOver(event, folder)
-                }
+                onDragOver={(event) => interaction.onDragOver(event, folder)}
                 onDragLeave={interaction.onDragLeave}
-                onDrop={(event) =>
-                    interaction.onDrop(event, folder)
-                }
-                style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '4px',
-                    padding: '4px',
-                    marginBottom: '4px',
-                    borderRadius: '6px',
-                    background: isDropTarget
-                        ? '#dbeafe'
-                        : isSelected
-                            ? '#eff6ff'
-                            : 'transparent',
-                    opacity: isDragging ? 0.45 : 1,
-                    cursor: interaction.disabled ? 'default' : 'grab',
-                }}
+                onDrop={(event) => interaction.onDrop(event, folder)}
             >
                 <button
                     type="button"
-                    onClick={toggle}
+                    className="tree-toggle"
                     disabled={interaction.disabled}
                     aria-expanded={expanded}
-                    aria-label={
-                        expanded
-                            ? `Thu gọn ${folder.name}`
-                            : `Mở rộng ${folder.name}`
-                    }
+                    aria-label={`${expanded ? 'Thu gọn' : 'Mở rộng'} ${folder.name}`}
+                    onClick={() => setExpanded((value) => !value)}
                 >
-                    {expanded ? '▼' : '▶'}
+                    {expanded ? '▾' : '▸'}
                 </button>
-
                 <button
                     type="button"
-                    onClick={openFolder}
+                    className="tree-name"
                     disabled={interaction.disabled}
-                    aria-current={isSelected ? 'true' : undefined}
-                    style={{
-                        textAlign: 'left',
-                        overflowWrap: 'anywhere',
-                        fontWeight: isSelected ? 'bold' : 'normal',
-                    }}
+                    aria-current={selected ? 'location' : undefined}
+                    title={folder.name}
+                    aria-label={folder.name}
+                    onClick={() => interaction.onOpen(folder)}
                 >
-                    📁 {folder.name}
+                    <span className="folder-glyph" aria-hidden="true">
+                        ▰
+                    </span>
+                    <span>{folder.name}</span>
                 </button>
-
-                <button
-                    type="button"
-                    title={`Tạo thư mục con trong ${folder.name}`}
-                    aria-label={`Tạo thư mục con trong ${folder.name}`}
-                    disabled={interaction.disabled}
-                    onClick={startCreateChild}
-                    onMouseDown={(event) => event.stopPropagation()}
-                    onDragStart={(event) => {
-                        event.preventDefault();
-                        event.stopPropagation();
-                    }}
-                    style={{
-                        marginLeft: 'auto',
-                        flexShrink: 0,
-                    }}
-                >
-                    +
-                </button>
+                <div className="tree-row-actions">
+                    <button
+                        type="button"
+                        className="icon-button"
+                        disabled={interaction.disabled}
+                        aria-label={`Tạo thư mục con trong ${folder.name}`}
+                        onClick={() => interaction.onRequestCreate(folder, ids)}
+                    >
+                        +
+                    </button>
+                    <WorkspaceMenu
+                        label={`Thao tác thư mục ${folder.name}`}
+                        disabled={interaction.disabled}
+                        items={[
+                            {
+                                label: 'Đổi tên thư mục',
+                                onClick: () => interaction.onRenameFolder(folder),
+                            },
+                            {
+                                label: 'Di chuyển thư mục',
+                                onClick: () => interaction.onMoveFolder(folder),
+                            },
+                            {
+                                label: 'Xóa thư mục',
+                                danger: true,
+                                onClick: () => interaction.onDeleteFolder(folder),
+                            },
+                        ]}
+                    />
+                </div>
             </div>
-
             {expanded && (
-                <div style={{ marginLeft: 24 }}>
-                    {showCreate && (
-                        <FolderCreateForm
-                            disabled={interaction.disabled}
-                            onCreate={createChild}
-                            onCancel={closeCreate}
+                <div className="tree-child-content">
+                    {creating && (
+                        <InlineFolderForm
+                            key={request.version}
+                            parentId={folder.id}
+                            interaction={interaction}
+                            onClose={interaction.onClearCreateRequest}
                         />
                     )}
-
                     {loading && (
-                        <p role="status">Đang tải...</p>
+                        <p className="tree-note" role="status">
+                            Đang tải…
+                        </p>
                     )}
-
-                    {!loading && error && (
-                        <div>
+                    {error && (
+                        <div className="tree-note">
                             <p role="alert">{error}</p>
-
                             <button
                                 type="button"
                                 disabled={interaction.disabled}
-                                onClick={() =>
-                                    setRetry((value) => value + 1)
-                                }
+                                onClick={() => setRetry((value) => value + 1)}
                             >
                                 Thử lại
                             </button>
                         </div>
                     )}
-
-                    {!error && (
-                        <>
-                            {children.map((child) => (
-                                <FolderTreeNode
-                                    key={child.id}
-                                    folder={child}
-                                    interaction={interaction}
-                                    foldersReload={foldersReload}
-                                />
-                            ))}
-
-                            {documents.map((document) => (
-                                <button
-                                    key={document.id}
-                                    type="button"
-                                    title={document.originalName}
-                                    disabled={documentDisabled}
-                                    onClick={(event) =>
-                                        selectDocument(event, document)
-                                    }
-                                    onDoubleClick={(event) =>
-                                        openDocument(event, document)
-                                    }
-                                    aria-pressed={
-                                        interaction.selectedDocumentId ===
-                                        document.id
-                                    }
-                                    style={{
-                                        display: 'block',
-                                        width: '100%',
-                                        padding: '6px 4px',
-                                        marginBottom: '4px',
-                                        textAlign: 'left',
-                                        overflow: 'hidden',
-                                        textOverflow: 'ellipsis',
-                                        whiteSpace: 'nowrap',
-                                        borderRadius: '6px',
-                                        background:
-                                            interaction.selectedDocumentId ===
-                                            document.id
-                                                ? '#dbeafe'
-                                                : 'transparent',
-                                        fontWeight:
-                                            interaction.selectedDocumentId ===
-                                            document.id
-                                                ? 'bold'
-                                                : 'normal',
-                                    }}
-                                >
-                                    📄{' '}
-                                    {document.title ||
-                                        document.originalName}
-                                </button>
-                            ))}
-
-                            {!loading &&
-                                !showCreate &&
-                                children.length === 0 &&
-                                documents.length === 0 && (
-                                    <p>Thư mục trống.</p>
-                                )}
-                        </>
+                    {!loading && !error && (
+                        <ul className="tree-branches">
+                            {children
+                                .filter((child) => !ids.includes(child.id))
+                                .map((child) => (
+                                    <FolderTreeNode
+                                        key={child.id}
+                                        folder={child}
+                                        reload={reload}
+                                        ancestorIds={ids}
+                                        interaction={interaction}
+                                    />
+                                ))}
+                        </ul>
+                    )}
+                    {!loading && !error && children.length === 0 && !creating && (
+                        <p className="tree-note">Không có thư mục con.</p>
                     )}
                 </div>
             )}
-        </div>
+        </li>
     );
 }

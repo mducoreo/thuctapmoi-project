@@ -1,8 +1,25 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from './api.js';
-import DocumentMetadataForm, {
-    emptyMetadata,
-} from './DocumentMetadataForm.jsx';
+import DocumentMetadataForm, { emptyMetadata } from './DocumentMetadataForm.jsx';
+import WorkspaceMenu from './WorkspaceMenu.jsx';
+import WorkspaceModal from './WorkspaceModal.jsx';
+
+const statuses = {
+    PENDING: 'Chưa xử lý',
+    PROCESSING: 'Đang xử lý',
+    COMPLETED: 'Hoàn thành',
+    FAILED: 'Thất bại',
+};
+function supportsOcr(document) {
+    return (
+        document.mimeType?.startsWith('image/') ||
+        document.mimeType === 'application/pdf' ||
+        /\.(pdf|png|jpe?g|bmp|tiff?|webp)$/i.test(document.originalName ?? '')
+    );
+}
+function fileType(document) {
+    return document.originalName?.split('.').pop()?.toUpperCase() || 'FILE';
+}
 
 export default function DocumentList({
                                          folderId,
@@ -15,444 +32,362 @@ export default function DocumentList({
                                          onRenameDocument,
                                          onMoveDocument,
                                          onDeleteDocument,
-                                         onPermanentDeleteDocument,
                                          onDownloadDocument,
                                          onRunDocumentOcr,
                                          onShowDocumentText,
                                          onDocumentsChanged,
                                      }) {
     const [documents, setDocuments] = useState([]);
-    const [loading, setLoading] = useState(false);
+    const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
-
-    const [editingDocument, setEditingDocument] = useState(null);
+    const [retry, setRetry] = useState(0);
+    const [query, setQuery] = useState('');
+    const [editing, setEditing] = useState(null);
     const [metadata, setMetadata] = useState(emptyMetadata);
     const [saving, setSaving] = useState(false);
     const [saveError, setSaveError] = useState('');
     const [success, setSuccess] = useState('');
-
-    const saveLock = useRef(false);
-
-    // Lấy danh sách khi đổi thư mục hoặc reload thay đổi.
+    const lock = useRef(false);
     useEffect(() => {
         let active = true;
-
-        async function loadDocuments() {
-            setDocuments([]);
-            setError('');
-            setEditingDocument(null);
-            setSaveError('');
-            setSuccess('');
-
-            if (folderId == null) {
-                setLoading(false);
-                return;
-            }
-
-            setLoading(true);
-
-            try {
-                const data = await api.documents(folderId);
-
+        setLoading(true);
+        setError('');
+        api.documents(folderId)
+            .then((data) => {
                 if (!Array.isArray(data)) {
-                    throw new Error(
-                        'API danh sách tài liệu chưa trả về một mảng.'
-                    );
+                    throw new Error('API danh sách tài liệu chưa trả về một mảng.');
                 }
-
                 if (active) {
                     setDocuments(data);
                 }
-            } catch (err) {
+            })
+            .catch((err) => {
                 if (active) {
                     setError(err.message);
                 }
-            } finally {
+            })
+            .finally(() => {
                 if (active) {
                     setLoading(false);
                 }
-            }
-        }
-
-        loadDocuments();
-
+            });
         return () => {
             active = false;
         };
-    }, [folderId, reload]);
-
-    // Kiểm tra tài liệu có phải ảnh hoặc PDF để hiện nút OCR.
-    function canRunOcr(document) {
-        return (
-            document.mimeType?.startsWith('image/') ||
-            document.mimeType === 'application/pdf' ||
-            /\.(pdf|png|jpe?g|bmp|tiff?|webp)$/i.test(
-                document.originalName ?? ''
-            )
-        );
-    }
-
-    // Mở form sửa metadata.
+    }, [folderId, reload, retry]);
     function startEdit(document) {
-        if (disabled || saving || saveLock.current) {
-            return;
-        }
-
+        const value = emptyMetadata();
+        Object.keys(value).forEach((key) => {
+            value[key] = document[key] ?? '';
+        });
+        setMetadata(value);
         setSaveError('');
         setSuccess('');
-        setEditingDocument(document);
-
-        const value = emptyMetadata();
-
-        for (const field of Object.keys(value)) {
-            value[field] = document[field] ?? '';
-        }
-
-        setMetadata(value);
+        setEditing(document);
     }
-
-    // Lưu metadata.
     async function saveMetadata(event) {
         event.preventDefault();
-
-        if (saveLock.current || disabled || !editingDocument) {
+        if (lock.current || disabled || !editing) {
             return;
         }
-
-        setSaveError('');
-
         if (!metadata.title.trim()) {
             setSaveError('Nhập tên văn bản.');
             return;
         }
-
-        saveLock.current = true;
+        lock.current = true;
         setSaving(true);
+        setSaveError('');
         onBusyChange?.(true);
-
         try {
-            const saved = await api.updateDocumentMetadata(
-                folderId,
-                editingDocument.id,
-                {
-                    ...metadata,
-                    title: metadata.title.trim(),
-                }
-            );
-
+            const saved = await api.updateDocumentMetadata(folderId, editing.id, {
+                ...metadata,
+                title: metadata.title.trim(),
+            });
             setDocuments((previous) =>
-                previous.map((document) =>
-                    document.id === saved.id ? saved : document
+                previous.map((item) =>
+                    item.id === editing.id ? { ...item, ...saved } : item
                 )
             );
-
-            setEditingDocument(null);
+            setEditing(null);
             setSuccess('Đã lưu thông tin văn bản.');
-
-            // Báo FoldersPage cập nhật danh sách và cây.
             onDocumentsChanged?.();
         } catch (err) {
             setSaveError(err.message);
         } finally {
-            saveLock.current = false;
+            lock.current = false;
             setSaving(false);
             onBusyChange?.(false);
         }
     }
-
-    if (folderId == null) {
-        return null;
-    }
-
+    const keyword = query.trim().toLocaleLowerCase('vi');
+    const visible = documents.filter((item) =>
+        [item.title, item.originalName, item.keywords].some((text) =>
+            text?.toLocaleLowerCase('vi').includes(keyword)
+        )
+    );
     return (
-        <section>
-            <h2>Tài liệu trong thư mục</h2>
-
-            {loading && <p>Đang tải tài liệu...</p>}
-
-            {error && (
-                <p className="message error" role="alert">
-                    {error}
-                </p>
-            )}
-
+        <section className="documents-section" aria-label="Tài liệu trong thư mục">
+            <div className="documents-heading">
+                <h2>
+                    Tài liệu <span className="count-label">{documents.length}</span>
+                </h2>
+                <label className="document-search">
+                    <span className="sr-only">Tìm tài liệu trong thư mục</span>
+                    <input
+                        type="search"
+                        placeholder="Tìm tài liệu trong thư mục…"
+                        value={query}
+                        onChange={(event) => setQuery(event.target.value)}
+                    />
+                </label>
+            </div>
             {success && (
-                <p className="message success" role="status">
+                <p role="status" className="message success">
                     {success}
                 </p>
             )}
-
-            {/* Metadata chỉ hiện trong form khi bấm Sửa thông tin. */}
-            {editingDocument && (
-                <form
-                    className="folders-form"
-                    onSubmit={saveMetadata}
-                >
-                    <h3>
-                        Sửa thông tin: {editingDocument.originalName}
-                    </h3>
-
-                    <DocumentMetadataForm
-                        value={metadata}
-                        onChange={setMetadata}
-                        disabled={disabled || saving}
-                    />
-
-                    {saveError && (
-                        <p className="message error" role="alert">
-                            {saveError}
-                        </p>
-                    )}
-
-                    <div className="folders-actions">
-                        <button
-                            type="submit"
-                            className="folders-primary"
-                            disabled={disabled || saving}
-                        >
-                            {saving ? 'Đang lưu...' : 'Lưu thông tin'}
-                        </button>
-
-                        <button
-                            type="button"
-                            disabled={disabled || saving}
-                            onClick={() => {
-                                setEditingDocument(null);
-                                setSaveError('');
-                            }}
-                        >
-                            Hủy
-                        </button>
-                    </div>
-                </form>
+            {error && (
+                <div className="message error" role="alert">
+                    {error}{' '}
+                    <button
+                        type="button"
+                        disabled={disabled}
+                        onClick={() => setRetry((value) => value + 1)}
+                    >
+                        Thử lại
+                    </button>
+                </div>
             )}
-
-            {!loading && !error && (
-                documents.length === 0 ? (
-                    <p>Chưa có tài liệu nào.</p>
-                ) : (
-                    <ul className="folders-list">
-                        {documents.map((document) => (
-                            <li
-                                key={document.id}
-                                className="folders-item"
-                                style={{
-                                    padding: '10px 12px',
-                                    gap: '12px',
-                                    flexWrap: 'wrap',
-                                    background:
+            <div className="documents-table-scroll">
+                <table className="documents-table">
+                    <thead>
+                    <tr>
+                        <th>Tên tài liệu</th>
+                        <th>Loại</th>
+                        <th>Trạng thái OCR</th>
+                        <th>
+                            <span className="sr-only">Thao tác</span>
+                        </th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    {loading ? (
+                        <tr>
+                            <td colSpan={4} className="table-empty" role="status">
+                                Đang tải tài liệu…
+                            </td>
+                        </tr>
+                    ) : !error && visible.length === 0 ? (
+                        <tr>
+                            <td colSpan={4} className="table-empty">
+                                {keyword
+                                    ? 'Không tìm thấy tài liệu phù hợp.'
+                                    : 'Chưa có tài liệu. Bấm “Tải tài liệu” để thêm file.'}
+                            </td>
+                        </tr>
+                    ) : (
+                        visible.map((document) => {
+                            const ocr = supportsOcr(document);
+                            const status = document.ocrStatus ?? 'PENDING';
+                            const blocked = disabled || saving || Boolean(editing);
+                            return (
+                                <tr
+                                    key={document.id}
+                                    className={
                                         selectedDocumentId === document.id
-                                            ? '#eff6ff'
-                                            : undefined,
-                                    outline:
-                                        selectedDocumentId === document.id
-                                            ? '1px solid #93c5fd'
-                                            : undefined,
-                                }}
-                            >
-                                {/* Chỉ hiện tên và loại file. */}
-                                <div
-                                    className="folders-info"
-                                    style={{
-                                        flex: '1 1 180px',
-                                        minWidth: 0,
-                                    }}
+                                            ? 'selected'
+                                            : ''
+                                    }
                                 >
-                                    <span
-                                        className="folders-icon"
-                                        aria-hidden="true"
-                                    >
-                                        📄
-                                    </span>
-
-                                    <div style={{ minWidth: 0 }}>
-                                        <strong
-                                            title={
-                                                document.originalName ||
-                                                document.title
-                                            }
-                                            style={{
-                                                display: 'block',
-                                                overflow: 'hidden',
-                                                textOverflow: 'ellipsis',
-                                                whiteSpace: 'nowrap',
-                                            }}
-                                        >
-                                            {document.originalName ||
-                                                document.title}
-                                        </strong>
-
-                                        <small style={{ color: '#64748b' }}>
-                                            {document.originalName
-                                                ?.split('.')
-                                                .pop()
-                                                ?.toUpperCase() || 'FILE'}
-                                        </small>
-                                    </div>
-                                </div>
-
-                                <div
-                                    className="folders-actions"
-                                    style={{
-                                        display: 'flex',
-                                        flexWrap: 'wrap',
-                                        gap: '6px',
-                                    }}
-                                >
-                                    <button
-                                        type="button"
-                                        disabled={
-                                            disabled ||
-                                            saving ||
-                                            !onOpenDocument
-                                        }
-                                        onClick={() =>
-                                            onOpenDocument(folderId, document)
-                                        }
-                                    >
-                                        Xem
-                                    </button>
-
-                                    {canRunOcr(document) && (
+                                    <td>
                                         <button
                                             type="button"
-                                            disabled={
-                                                disabled ||
-                                                saving ||
-                                                !onRunDocumentOcr
-                                            }
+                                            className="document-name"
+                                            title={document.originalName}
+                                            disabled={blocked}
                                             onClick={() =>
-                                                onRunDocumentOcr(
-                                                    folderId,
-                                                    document
-                                                )
+                                                onOpenDocument(folderId, document)
                                             }
                                         >
-                                            Nhận dạng chữ
+                                                <span
+                                                    aria-hidden="true"
+                                                    className={`file-glyph ${fileType(document) === 'PDF' ? 'pdf' : ''}`}
+                                                >
+                                                    ▤
+                                                </span>
+                                            <span>
+                                                    <strong>
+                                                        {document.title ||
+                                                            document.originalName}
+                                                    </strong>
+                                                {document.title &&
+                                                    document.title !==
+                                                    document.originalName && (
+                                                        <small>
+                                                            {document.originalName}
+                                                        </small>
+                                                    )}
+                                                </span>
                                         </button>
-                                    )}
-
-                                    <button
-                                        type="button"
-                                        disabled={
-                                            disabled ||
-                                            saving ||
-                                            !onShowDocumentText
-                                        }
-                                        onClick={() =>
-                                            onShowDocumentText(
-                                                folderId,
-                                                document
-                                            )
-                                        }
-                                    >
-                                        Xem chữ
-                                    </button>
-
-                                    <button
-                                        type="button"
-                                        disabled={
-                                            disabled ||
-                                            saving ||
-                                            !onDetailDocument
-                                        }
-                                        onClick={() =>
-                                            onDetailDocument(folderId, document)
-                                        }
-                                    >
-                                        Chi tiết
-                                    </button>
-
-                                    <button
-                                        type="button"
-                                        disabled={
-                                            disabled ||
-                                            saving ||
-                                            !onRenameDocument
-                                        }
-                                        onClick={() =>
-                                            onRenameDocument(folderId, document)
-                                        }
-                                    >
-                                        Đổi tên file
-                                    </button>
-
-                                    <button
-                                        type="button"
-                                        disabled={
-                                            disabled ||
-                                            saving ||
-                                            !onMoveDocument
-                                        }
-                                        onClick={() =>
-                                            onMoveDocument(folderId, document)
-                                        }
-                                    >
-                                        Di chuyển
-                                    </button>
-
-                                    <button
-                                        type="button"
-                                        disabled={
-                                            disabled ||
-                                            saving ||
-                                            !onDownloadDocument
-                                        }
-                                        onClick={() =>
-                                            onDownloadDocument(
-                                                folderId,
-                                                document
-                                            )
-                                        }
-                                    >
-                                        Tải xuống
-                                    </button>
-
-                                    <button
-                                        type="button"
-                                        className="folders-danger"
-                                        disabled={
-                                            disabled ||
-                                            saving ||
-                                            !onDeleteDocument
-                                        }
-                                        onClick={() =>
-                                            onDeleteDocument(folderId, document)
-                                        }
-                                    >
-                                        Xóa mềm
-                                    </button>
-
-                                    <button
-                                        type="button"
-                                        className="folders-danger"
-                                        disabled={
-                                            disabled ||
-                                            saving ||
-                                            !onPermanentDeleteDocument
-                                        }
-                                        onClick={() =>
-                                            onPermanentDeleteDocument(
-                                                folderId,
-                                                document
-                                            )
-                                        }
-                                    >
-                                        Xóa vĩnh viễn
-                                    </button>
-
-                                    <button
-                                        type="button"
-                                        disabled={disabled || saving}
-                                        onClick={() => startEdit(document)}
-                                    >
-                                        Sửa thông tin
-                                    </button>
-                                </div>
-                            </li>
-                        ))}
-                    </ul>
-                )
+                                    </td>
+                                    <td className="file-type">
+                                        {fileType(document)}
+                                    </td>
+                                    <td>
+                                        {ocr ? (
+                                            <button
+                                                type="button"
+                                                className={`ocr-badge ${status.toLowerCase()}`}
+                                                disabled={blocked}
+                                                title={
+                                                    status === 'FAILED'
+                                                        ? 'Bấm để xem lỗi OCR'
+                                                        : 'Bấm để xem nội dung chữ và trạng thái OCR'
+                                                }
+                                                onClick={() =>
+                                                    onShowDocumentText(
+                                                        folderId,
+                                                        document
+                                                    )
+                                                }
+                                            >
+                                                {statuses[status] ?? status}
+                                            </button>
+                                        ) : (
+                                            <span className="muted">—</span>
+                                        )}
+                                    </td>
+                                    <td>
+                                        <div className="document-row-actions">
+                                            <button
+                                                type="button"
+                                                className="view-button"
+                                                disabled={blocked}
+                                                onClick={() =>
+                                                    onOpenDocument(folderId, document)
+                                                }
+                                            >
+                                                Xem
+                                            </button>
+                                            <WorkspaceMenu
+                                                label={`Thao tác tài liệu ${document.originalName}`}
+                                                disabled={blocked}
+                                                items={[
+                                                    {
+                                                        label: 'Chi tiết',
+                                                        onClick: () =>
+                                                            onDetailDocument(
+                                                                folderId,
+                                                                document
+                                                            ),
+                                                    },
+                                                    ...(ocr
+                                                        ? [
+                                                            {
+                                                                label: 'Nhận dạng chữ',
+                                                                disabled:
+                                                                    status ===
+                                                                    'PROCESSING',
+                                                                onClick: () =>
+                                                                    onRunDocumentOcr(
+                                                                        folderId,
+                                                                        document
+                                                                    ),
+                                                            },
+                                                            {
+                                                                label: 'Xem nội dung chữ',
+                                                                onClick: () =>
+                                                                    onShowDocumentText(
+                                                                        folderId,
+                                                                        document
+                                                                    ),
+                                                            },
+                                                        ]
+                                                        : []),
+                                                    {
+                                                        label: 'Sửa thông tin',
+                                                        onClick: () =>
+                                                            startEdit(document),
+                                                    },
+                                                    {
+                                                        label: 'Đổi tên file',
+                                                        onClick: () =>
+                                                            onRenameDocument(
+                                                                folderId,
+                                                                document
+                                                            ),
+                                                    },
+                                                    {
+                                                        label: 'Di chuyển',
+                                                        onClick: () =>
+                                                            onMoveDocument(
+                                                                folderId,
+                                                                document
+                                                            ),
+                                                    },
+                                                    {
+                                                        label: 'Tải xuống',
+                                                        onClick: () =>
+                                                            onDownloadDocument(
+                                                                folderId,
+                                                                document
+                                                            ),
+                                                    },
+                                                    {
+                                                        label: 'Xóa mềm',
+                                                        danger: true,
+                                                        onClick: () =>
+                                                            onDeleteDocument(
+                                                                folderId,
+                                                                document
+                                                            ),
+                                                    },
+                                                ]}
+                                            />
+                                        </div>
+                                    </td>
+                                </tr>
+                            );
+                        })
+                    )}
+                    </tbody>
+                </table>
+            </div>
+            {editing && (
+                <WorkspaceModal
+                    title="Sửa thông tin văn bản"
+                    busy={saving}
+                    onClose={() => setEditing(null)}
+                >
+                    <form className="workspace-form" onSubmit={saveMetadata}>
+                        <DocumentMetadataForm
+                            value={metadata}
+                            onChange={setMetadata}
+                            disabled={saving}
+                        />
+                        {saveError && (
+                            <p className="message error" role="alert">
+                                {saveError}
+                            </p>
+                        )}
+                        <div className="modal-footer">
+                            <button
+                                type="button"
+                                disabled={saving}
+                                onClick={() => setEditing(null)}
+                            >
+                                Hủy
+                            </button>
+                            <button
+                                type="submit"
+                                className="folders-primary"
+                                disabled={saving}
+                            >
+                                {saving ? 'Đang lưu…' : 'Lưu thông tin'}
+                            </button>
+                        </div>
+                    </form>
+                </WorkspaceModal>
             )}
         </section>
     );

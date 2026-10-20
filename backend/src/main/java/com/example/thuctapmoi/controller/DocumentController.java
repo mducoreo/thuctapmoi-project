@@ -11,6 +11,12 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
+import com.example.thuctapmoi.dto.DocumentTextRequest;
+import jakarta.validation.Valid;
+import org.springframework.security.core.Authentication;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 
 import java.util.List;
 import java.util.Map;
@@ -218,4 +224,23 @@ public class DocumentController {
 
         return Map.of("text", text);
     }
+    // Cập nhật nội dung OCR đã chỉnh sửa.
+    @PutMapping(
+            value = "/{documentId}/text",
+            produces = "text/plain;charset=UTF-8"
+    )
+    public String updateExtractedText(
+            @PathVariable Long folderId,
+            @PathVariable Long documentId,
+            @Valid @RequestBody DocumentTextRequest request,
+            Authentication authentication
+    ) {
+        return service.updateExtractedText(
+                folderId,
+                documentId,
+                request,
+                authentication.getName()
+        );
+    }
+
 }

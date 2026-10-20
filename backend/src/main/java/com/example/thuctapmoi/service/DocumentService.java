@@ -2,27 +2,36 @@ package com.example.thuctapmoi.service;
 
 import com.example.thuctapmoi.dto.DocumentMetadataRequest;
 import com.example.thuctapmoi.dto.DocumentMoveRequest;
+import com.example.thuctapmoi.dto.DocumentPageResponse;
 import com.example.thuctapmoi.dto.DocumentRenameRequest;
 import com.example.thuctapmoi.dto.DocumentResponse;
+import com.example.thuctapmoi.dto.DocumentSearchRequest;
+import com.example.thuctapmoi.dto.DocumentTextRequest;
 import com.example.thuctapmoi.entity.Document;
 import com.example.thuctapmoi.entity.Folder;
+import com.example.thuctapmoi.entity.OcrStatus;
 import com.example.thuctapmoi.entity.User;
+import com.example.thuctapmoi.entity.UserRole;
 import com.example.thuctapmoi.repository.DocumentRepository;
 import com.example.thuctapmoi.repository.FolderRepository;
 import com.example.thuctapmoi.repository.UserRepository;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
-import com.example.thuctapmoi.entity.OcrStatus;
-import org.springframework.transaction.annotation.Propagation;
+
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -98,7 +107,10 @@ public class DocumentService {
             document.setMimeType(mimeType);
             document.setSize((long) content.length);
             document.setFolder(folder);
-            document.setOwner(user);
+
+            // ADMIN upload vào thư mục của ai thì tài liệu thuộc người đó.
+            document.setOwner(folder.getOwner());
+
             document.setUploadedAt(LocalDateTime.now());
             document.setOcrStatus(OcrStatus.PENDING);
             document.setOcrError(null);
@@ -147,7 +159,7 @@ public class DocumentService {
                 .toList();
     }
 
-    // 3. Lấy chi tiết.
+    // 3. Lấy chi tiết tài liệu.
     @Transactional(readOnly = true)
     public DocumentResponse detail(
             Long folderId,
@@ -197,7 +209,7 @@ public class DocumentService {
         return toResponse(documentRepository.saveAndFlush(document));
     }
 
-    // 6. Chuyển tài liệu sang thư mục khác.
+    // 6. Chuyển tài liệu sang thư mục khác cùng chủ sở hữu.
     @Transactional
     public DocumentResponse move(
             Long folderId,
@@ -208,11 +220,20 @@ public class DocumentService {
         User user = currentUser(username);
         Document document = ownedDocument(folderId, documentId, user);
 
-        // Thư mục đích phải tồn tại và thuộc người đang đăng nhập.
         Folder targetFolder = ownedFolder(
                 request.getTargetFolderId(),
                 user
         );
+
+        // Giữ tài liệu trong cây thư mục của cùng chủ sở hữu.
+        if (!document.getOwner().getId().equals(
+                targetFolder.getOwner().getId()
+        )) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Thư mục đích phải cùng chủ sở hữu với tài liệu"
+            );
+        }
 
         if (document.getFolder().getId().equals(targetFolder.getId())) {
             throw new ResponseStatusException(
@@ -292,12 +313,7 @@ public class DocumentService {
             );
         }
 
-        if (!document.getOwner().getId().equals(user.getId())) {
-            throw new ResponseStatusException(
-                    HttpStatus.FORBIDDEN,
-                    "Bạn không có quyền xóa tài liệu này"
-            );
-        }
+        checkDocumentPermission(document, user);
 
         FileStorageService.PendingDelete pending =
                 fileStorageService.prepareDelete(
@@ -305,7 +321,6 @@ public class DocumentService {
                 );
 
         if (pending != null) {
-            // Storage xử lý file; DocumentService quản lý transaction.
             TransactionSynchronizationManager.registerSynchronization(
                     new TransactionSynchronization() {
 
@@ -351,7 +366,6 @@ public class DocumentService {
         User user = currentUser(username);
         Document document = ownedDocument(folderId, documentId, user);
 
-        // Lấy thông tin cần dùng trước khi cập nhật trạng thái.
         String storedName = document.getStoredName();
         String mimeType = document.getMimeType();
 
@@ -391,7 +405,6 @@ public class DocumentService {
                             exception
                     );
 
-            // Commit FAILED và lỗi trước khi ném exception ra ngoài.
             ocrStatusService.fail(documentId, errorMessage);
 
             if (exception instanceof ResponseStatusException responseException) {
@@ -405,7 +418,6 @@ public class DocumentService {
             );
         }
 
-        // Lưu nội dung và COMPLETED sau khi nhận dạng thành công.
         ocrStatusService.complete(documentId, text);
 
         return text;
@@ -426,18 +438,198 @@ public class DocumentService {
         return text == null ? "" : text;
     }
 
+    // 13. Lưu lại nội dung OCR sau khi người dùng chỉnh sửa.
+    @Transactional
+    public String updateExtractedText(
+            Long folderId,
+            Long documentId,
+            DocumentTextRequest request,
+            String username
+    ) {
+        User user = currentUser(username);
+
+        Document document = ownedDocument(
+                folderId,
+                documentId,
+                user
+        );
+
+        document.setExtractedText(request.getExtractedText());
+
+        documentRepository.saveAndFlush(document);
+
+        return document.getExtractedText();
+    }
+
+    // 14. Tìm tên, metadata, nội dung OCR, lọc và phân trang.
+    @Transactional(readOnly = true)
+    public DocumentPageResponse search(
+            DocumentSearchRequest request,
+            String username
+    ) {
+        User user = currentUser(username);
+
+        // Kiểm tra thông tin phân trang.
+        if (request.getPage() < 0) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Số trang không được nhỏ hơn 0"
+            );
+        }
+
+        if (request.getSize() < 1 || request.getSize() > 100) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Số tài liệu mỗi trang phải từ 1 đến 100"
+            );
+        }
+
+        // Kiểm tra khoảng ngày ban hành.
+        if (request.getIssuedDateFrom() != null
+                && request.getIssuedDateTo() != null
+                && request.getIssuedDateFrom().isAfter(
+                request.getIssuedDateTo()
+        )) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Ngày bắt đầu không được sau ngày kết thúc"
+            );
+        }
+
+        // Nếu chọn thư mục thì kiểm tra quyền truy cập.
+        if (request.getFolderId() != null) {
+            ownedFolder(request.getFolderId(), user);
+        }
+
+        String keyword = normalizeSearchValue(
+                request.getKeyword()
+        );
+        String documentNumber = normalizeSearchValue(
+                request.getDocumentNumber()
+        );
+        String documentType = normalizeSearchValue(
+                request.getDocumentType()
+        );
+        String issuer = normalizeSearchValue(
+                request.getIssuer()
+        );
+        String ocrKeyword = normalizeSearchValue(
+                request.getOcrKeyword()
+        );
+
+        Page<Document> result;
+
+        if (ocrKeyword == null) {
+            // Không nhập từ khóa OCR: dùng query tìm kiếm thông thường.
+            Pageable pageable = PageRequest.of(
+                    request.getPage(),
+                    request.getSize(),
+                    Sort.by(
+                            Sort.Order.desc("uploadedAt"),
+                            Sort.Order.desc("id")
+                    )
+            );
+
+            result = documentRepository.search(
+                    keyword,
+                    request.getFolderId(),
+                    documentNumber,
+                    documentType,
+                    issuer,
+                    request.getIssuedDateFrom(),
+                    request.getIssuedDateTo(),
+                    user.getUsername(),
+                    isAdmin(user),
+                    pageable
+            );
+        } else {
+            // Biến nội dung nhập thành một cụm từ cho CONTAINS.
+            String phrase = ocrKeyword
+                    .replace("\"", " ")
+                    .replaceAll("\\s+", " ")
+                    .strip();
+
+            if (phrase.isBlank()) {
+                throw new ResponseStatusException(
+                        HttpStatus.BAD_REQUEST,
+                        "Từ khóa OCR không hợp lệ"
+                );
+            }
+
+            String ocrCondition = "\"" + phrase + "\"";
+
+            // Query SQL đã có ORDER BY nên chỉ truyền thông tin trang.
+            Pageable pageable = PageRequest.of(
+                    request.getPage(),
+                    request.getSize()
+            );
+
+            result = documentRepository.searchWithOcr(
+                    ocrCondition,
+                    keyword,
+                    request.getFolderId(),
+                    documentNumber,
+                    documentType,
+                    issuer,
+                    request.getIssuedDateFrom(),
+                    request.getIssuedDateTo(),
+                    user.getUsername(),
+                    isAdmin(user),
+                    pageable
+            );
+        }
+
+        // Chuyển từng Document thành DocumentResponse.
+        List<DocumentResponse> items = result.getContent()
+                .stream()
+                .map(this::toResponse)
+                .toList();
+
+        return new DocumentPageResponse(
+                items,
+                result.getNumber(),
+                result.getSize(),
+                result.getTotalElements(),
+                result.getTotalPages()
+        );
+    }
+
     // ===== CÁC METHOD PHỤ =====
 
-    // Tìm người đang đăng nhập.
+    // Bỏ khoảng trắng thừa ở hai đầu.
+    // Không nhập nội dung thì trả null để query bỏ qua điều kiện.
+    private String normalizeSearchValue(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+
+        return value.strip();
+    }
+
+    // Tìm người đang đăng nhập và kiểm tra trạng thái tài khoản.
     private User currentUser(String username) {
-        return userRepository.findByUsername(username)
+        User user = userRepository.findByUsername(username)
                 .orElseThrow(() -> new ResponseStatusException(
                         HttpStatus.UNAUTHORIZED,
                         "Tài khoản không tồn tại"
                 ));
+
+        if (!user.isEnabled()) {
+            throw new ResponseStatusException(
+                    HttpStatus.UNAUTHORIZED,
+                    "Tài khoản đã bị khóa"
+            );
+        }
+
+        return user;
     }
 
-    // Tìm thư mục và kiểm tra quyền sở hữu.
+    // Kiểm tra quyền ADMIN.
+    private boolean isAdmin(User user) {
+        return user.getRole() == UserRole.ADMIN;
+    }
+
+    // ADMIN hoặc chủ sở hữu được truy cập thư mục.
     private Folder ownedFolder(Long folderId, User user) {
         Folder folder = folderRepository.findById(folderId)
                 .orElseThrow(() -> new ResponseStatusException(
@@ -445,7 +637,9 @@ public class DocumentService {
                         "Thư mục không tồn tại"
                 ));
 
-        if (!folder.getOwner().getId().equals(user.getId())) {
+        boolean isOwner = folder.getOwner().getId().equals(user.getId());
+
+        if (!isAdmin(user) && !isOwner) {
             throw new ResponseStatusException(
                     HttpStatus.FORBIDDEN,
                     "Bạn không có quyền truy cập thư mục này"
@@ -455,8 +649,20 @@ public class DocumentService {
         return folder;
     }
 
+    // ADMIN hoặc chủ sở hữu được thao tác với tài liệu.
+    private void checkDocumentPermission(Document document, User user) {
+        boolean isOwner = document.getOwner().getId().equals(user.getId());
+
+        if (!isAdmin(user) && !isOwner) {
+            throw new ResponseStatusException(
+                    HttpStatus.FORBIDDEN,
+                    "Bạn không có quyền thao tác với tài liệu này"
+            );
+        }
+    }
+
     // Kiểm tra chung cho chi tiết, metadata, đổi tên,
-    // di chuyển, xóa, xem, tải xuống và OCR.
+    // di chuyển, xóa mềm, xem, tải xuống và OCR.
     private Document ownedDocument(
             Long folderId,
             Long documentId,
@@ -484,12 +690,7 @@ public class DocumentService {
             );
         }
 
-        if (!document.getOwner().getId().equals(user.getId())) {
-            throw new ResponseStatusException(
-                    HttpStatus.FORBIDDEN,
-                    "Bạn không có quyền thao tác với tài liệu này"
-            );
-        }
+        checkDocumentPermission(document, user);
 
         return document;
     }

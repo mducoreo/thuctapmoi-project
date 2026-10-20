@@ -74,7 +74,9 @@ public class AuthService {
         //tra id va username cua tak da luu
         return new UserResponse(
                 saved.getId(),
-                saved.getUsername()
+                saved.getUsername(),
+                saved.getRole(),
+                saved.isEnabled()
         );
     }
     public AuthResponse login(AuthRequest request) {
@@ -100,9 +102,13 @@ public class AuthService {
             );
         }
 
+        requireEnabled(user);
+
         // 3. Tạo hai token.
         String accessToken =
                 jwtService.generateAccessToken(user.getUsername());
+
+        requireEnabled(user);
 
         String refreshToken =
                 jwtService.generateRefreshToken(user.getUsername());
@@ -146,11 +152,21 @@ public class AuthService {
                         HttpStatus.UNAUTHORIZED,
                         "Tài khoản không tồn tại"
                 ));
-
+        requireEnabled(user);
         return new UserResponse(
                 user.getId(),
-                user.getUsername()
+                user.getUsername(),
+                user.getRole(),
+                user.isEnabled()
         );
+    }
+    private void requireEnabled(User user) {
+        if (!user.isEnabled()) {
+            throw new ResponseStatusException(
+                    HttpStatus.UNAUTHORIZED,
+                    "Tài khoản đã bị khóa"
+            );
+        }
     }
 }
 
