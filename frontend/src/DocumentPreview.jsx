@@ -19,6 +19,53 @@ function createTextFileName(originalName) {
     return `${name || 'tai-lieu'}-OCR.txt`;
 }
 
+// Tạo trang riêng để in ảnh hoặc nội dung OCR.
+function preparePrintPage(printWindow, title) {
+    const printDocument = printWindow.document;
+
+    printDocument.documentElement.lang = 'vi';
+    printDocument.title = title;
+
+    const charset = printDocument.createElement('meta');
+    charset.setAttribute('charset', 'UTF-8');
+    printDocument.head.appendChild(charset);
+
+    const style = printDocument.createElement('style');
+    style.textContent = `
+        @page {
+            margin: 15mm;
+        }
+
+        body {
+            margin: 0;
+            color: #000;
+            background: #fff;
+            font-family: Arial, sans-serif;
+            font-size: 12pt;
+            line-height: 1.5;
+        }
+
+        pre {
+            margin: 0;
+            font: inherit;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+        }
+
+        img {
+            display: block;
+            max-width: 100%;
+            height: auto;
+            margin: 0 auto;
+        }
+    `;
+
+    printDocument.head.appendChild(style);
+    printDocument.body.replaceChildren();
+
+    return printDocument;
+}
+
 export default function DocumentPreview({
                                             folderId,
                                             document: item,
@@ -26,6 +73,9 @@ export default function DocumentPreview({
                                             onClose,
                                         }) {
     const dialogRef = useRef(null);
+
+    // Chặn bấm liên tiếp khi đang chuẩn bị in.
+    const printLock = useRef(false);
 
     const [file, setFile] = useState({
         url: '',
@@ -41,6 +91,7 @@ export default function DocumentPreview({
     });
 
     const [copying, setCopying] = useState(false);
+    const [printing, setPrinting] = useState(false);
     const [message, setMessage] = useState('');
     const [actionError, setActionError] = useState('');
 
@@ -144,7 +195,6 @@ export default function DocumentPreview({
             }
         }
 
-        // File và OCR tải song song; mỗi phần xử lý lỗi riêng.
         void Promise.allSettled([
             loadFile(),
             loadOcr(),
@@ -172,6 +222,12 @@ export default function DocumentPreview({
     const isImage = file.mimeType
         .toLowerCase()
         .startsWith('image/');
+
+    const filePrintable =
+        !file.loading &&
+        !file.error &&
+        Boolean(file.url) &&
+        (isPdf || isImage);
 
     async function copyOcrText() {
         if (!textAvailable || copying) {
@@ -238,12 +294,124 @@ export default function DocumentPreview({
             link?.remove();
 
             if (url) {
-                // Cho trình duyệt thời gian bắt đầu tải trước khi thu hồi URL.
                 window.setTimeout(
                     () => URL.revokeObjectURL(url),
                     60000
                 );
             }
+        }
+    }
+
+    // In file gốc hoặc nội dung OCR.
+    async function printDocument(type) {
+        const printOcr = type === 'ocr';
+
+        if (
+            printLock.current ||
+            (printOcr ? !textAvailable : !filePrintable)
+        ) {
+            return;
+        }
+
+        setMessage('');
+        setActionError('');
+
+        // Mở ngay trong sự kiện click để tránh bị chặn popup
+        // sau khi chờ API trả về.
+        const printWindow = window.open('', '_blank');
+
+        if (!printWindow) {
+            setActionError(
+                'Trình duyệt đã chặn tab in. Hãy cho phép cửa sổ bật lên rồi thử lại.'
+            );
+            return;
+        }
+
+        printLock.current = true;
+        setPrinting(true);
+
+        try {
+            printWindow.document.title = 'Chuẩn bị in';
+            printWindow.document.body.textContent =
+                'Đang chuẩn bị tài liệu…';
+
+            if (!printOcr && isPdf) {
+                await api.logPrint(folderId, documentId);
+
+                if (printWindow.closed) {
+                    return;
+                }
+
+                // Trình xem PDF của trình duyệt có sẵn nút in
+                // và mục chọn phạm vi trang.
+                printWindow.location.replace(file.url);
+
+                setMessage(
+                    'Đã mở PDF ở tab mới. Bấm biểu tượng máy in hoặc Ctrl + P, ' +
+                    'rồi chọn phạm vi trang cần in.'
+                );
+
+                return;
+            }
+
+            const printDocument = preparePrintPage(
+                printWindow,
+                printOcr
+                    ? `${originalName || 'Tài liệu'} - OCR`
+                    : originalName || 'Tài liệu'
+            );
+
+            if (printOcr) {
+                const text = printDocument.createElement('pre');
+
+                // Gán textContent để nội dung OCR được hiển thị
+                // dưới dạng chữ, không bị hiểu thành HTML.
+                text.textContent = ocr.text;
+                printDocument.body.appendChild(text);
+            } else {
+                const image = printDocument.createElement('img');
+                image.alt = originalName || 'Tài liệu';
+
+                // Chờ ảnh tải xong trước khi mở hộp thoại in.
+                await new Promise((resolve, reject) => {
+                    image.onload = resolve;
+                    image.onerror = () => reject(
+                        new Error('Không thể tải ảnh để in.')
+                    );
+
+                    image.src = file.url;
+                    printDocument.body.appendChild(image);
+                });
+            }
+
+            if (printWindow.closed) {
+                return;
+            }
+
+            await api.logPrint(folderId, documentId);
+
+            if (printWindow.closed) {
+                return;
+            }
+
+            printWindow.focus();
+            printWindow.print();
+
+            setMessage(
+                'Đã gửi yêu cầu mở hộp thoại in. ' +
+                'Bạn có thể chọn phạm vi trang trong hộp thoại.'
+            );
+        } catch (error) {
+            if (!printWindow.closed) {
+                printWindow.close();
+            }
+
+            setActionError(
+                error.message || 'Không thể chuẩn bị tài liệu để in.'
+            );
+        } finally {
+            printLock.current = false;
+            setPrinting(false);
         }
     }
 
@@ -280,19 +448,47 @@ export default function DocumentPreview({
                     </button>
                 </header>
 
+                {message && (
+                    <p
+                        className="document-reader-success"
+                        role="status"
+                    >
+                        {message}
+                    </p>
+                )}
+
+                {actionError && (
+                    <p
+                        className="document-reader-error"
+                        role="alert"
+                    >
+                        {actionError}
+                    </p>
+                )}
+
                 <div className="document-reader-grid">
                     <section className="document-reader-panel">
                         <div className="document-reader-panel-header">
                             <h3>File gốc</h3>
 
-                            {file.url && (
-                                <a
-                                    href={file.url}
-                                    download={originalName}
+                            <div className="document-reader-actions">
+                                {file.url && (
+                                    <a
+                                        href={file.url}
+                                        download={originalName}
+                                    >
+                                        Tải file gốc
+                                    </a>
+                                )}
+
+                                <button
+                                    type="button"
+                                    disabled={!filePrintable || printing}
+                                    onClick={() => printDocument('file')}
                                 >
-                                    Tải file gốc
-                                </a>
-                            )}
+                                    In file gốc
+                                </button>
+                            </div>
                         </div>
 
                         <div className="document-reader-file">
@@ -322,8 +518,8 @@ export default function DocumentPreview({
                             ) : (
                                 <p>
                                     Định dạng này chưa hỗ trợ xem
-                                    trực tiếp. Bấm “Tải file gốc”
-                                    để mở trên máy.
+                                    và in trực tiếp. Bấm “Tải file gốc”
+                                    để mở và in trên máy.
                                 </p>
                             )}
                         </div>
@@ -336,9 +532,7 @@ export default function DocumentPreview({
                             <div className="document-reader-actions">
                                 <button
                                     type="button"
-                                    disabled={
-                                        !textAvailable || copying
-                                    }
+                                    disabled={!textAvailable || copying}
                                     onClick={copyOcrText}
                                 >
                                     {copying
@@ -352,6 +546,14 @@ export default function DocumentPreview({
                                     onClick={exportOcrText}
                                 >
                                     Xuất TXT
+                                </button>
+
+                                <button
+                                    type="button"
+                                    disabled={!textAvailable || printing}
+                                    onClick={() => printDocument('ocr')}
+                                >
+                                    In OCR
                                 </button>
                             </div>
                         </div>
@@ -380,24 +582,6 @@ export default function DocumentPreview({
                                     text={ocr.text}
                                     keyword={highlightKeyword}
                                 />
-                            )}
-
-                            {message && (
-                                <p
-                                    className="document-reader-success"
-                                    role="status"
-                                >
-                                    {message}
-                                </p>
-                            )}
-
-                            {actionError && (
-                                <p
-                                    className="document-reader-error"
-                                    role="alert"
-                                >
-                                    {actionError}
-                                </p>
                             )}
                         </div>
                     </section>

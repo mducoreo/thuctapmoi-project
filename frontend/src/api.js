@@ -555,4 +555,13 @@ export const api = {
             `/folders/${folderId}/documents/${documentId}/download`
         );
     },
+    // Ghi nhận người dùng yêu cầu in tài liệu.
+    logPrint(folderId, documentId) {
+        return request(
+            `/folders/${folderId}/documents/${documentId}/print`,
+            undefined,
+            'POST',
+            true
+        );
+    },
 };

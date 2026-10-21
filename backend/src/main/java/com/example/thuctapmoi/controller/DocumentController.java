@@ -4,6 +4,7 @@ import com.example.thuctapmoi.dto.DocumentMetadataRequest;
 import com.example.thuctapmoi.dto.DocumentMoveRequest;
 import com.example.thuctapmoi.dto.DocumentRenameRequest;
 import com.example.thuctapmoi.dto.DocumentResponse;
+import com.example.thuctapmoi.dto.DocumentTextRequest;
 import com.example.thuctapmoi.service.DocumentService;
 import jakarta.validation.Valid;
 import org.springframework.http.MediaType;
@@ -11,12 +12,6 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
-import com.example.thuctapmoi.dto.DocumentTextRequest;
-import jakarta.validation.Valid;
-import org.springframework.security.core.Authentication;
-import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.PutMapping;
-import org.springframework.web.bind.annotation.RequestBody;
 
 import java.util.List;
 import java.util.Map;
@@ -171,6 +166,22 @@ public class DocumentController {
         );
     }
 
+    // Ghi nhận người dùng yêu cầu in tài liệu.
+    @PostMapping("/{documentId}/print")
+    public ResponseEntity<Void> logPrint(
+            @PathVariable("folderId") Long folderId,
+            @PathVariable("documentId") Long documentId,
+            Authentication authentication
+    ) {
+        service.logPrint(
+                folderId,
+                documentId,
+                authentication.getName()
+        );
+
+        return ResponseEntity.noContent().build();
+    }
+
     // Xóa vĩnh viễn.
     @DeleteMapping("/{documentId}/permanent")
     public ResponseEntity<Void> permanentDelete(
@@ -224,14 +235,15 @@ public class DocumentController {
 
         return Map.of("text", text);
     }
+
     // Cập nhật nội dung OCR đã chỉnh sửa.
     @PutMapping(
             value = "/{documentId}/text",
             produces = "text/plain;charset=UTF-8"
     )
     public String updateExtractedText(
-            @PathVariable Long folderId,
-            @PathVariable Long documentId,
+            @PathVariable("folderId") Long folderId,
+            @PathVariable("documentId") Long documentId,
             @Valid @RequestBody DocumentTextRequest request,
             Authentication authentication
     ) {
@@ -242,5 +254,4 @@ public class DocumentController {
                 authentication.getName()
         );
     }
-
 }

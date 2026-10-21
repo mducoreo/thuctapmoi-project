@@ -1,5 +1,5 @@
 package com.example.thuctapmoi.service;
-
+import com.example.thuctapmoi.entity.AuditAction;
 import com.example.thuctapmoi.dto.DocumentMetadataRequest;
 import com.example.thuctapmoi.dto.DocumentMoveRequest;
 import com.example.thuctapmoi.dto.DocumentPageResponse;
@@ -48,6 +48,7 @@ public class DocumentService {
     private final DocumentFileValidator fileValidator;
     private final OcrService ocrService;
     private final DocumentOcrStatusService ocrStatusService;
+    private final AuditLogService auditLogService;
 
     public DocumentService(
             DocumentRepository documentRepository,
@@ -56,7 +57,8 @@ public class DocumentService {
             FileStorageService fileStorageService,
             DocumentFileValidator fileValidator,
             OcrService ocrService,
-            DocumentOcrStatusService ocrStatusService
+            DocumentOcrStatusService ocrStatusService,
+            AuditLogService auditLogService
     ) {
         this.documentRepository = documentRepository;
         this.folderRepository = folderRepository;
@@ -65,11 +67,13 @@ public class DocumentService {
         this.fileValidator = fileValidator;
         this.ocrService = ocrService;
         this.ocrStatusService = ocrStatusService;
+        this.auditLogService = auditLogService;
     }
 
     // ===== CÁC METHOD CHÍNH =====
 
     // 1. Upload file kèm metadata.
+    @Transactional
     public DocumentResponse upload(
             Long folderId,
             MultipartFile file,
@@ -118,6 +122,10 @@ public class DocumentService {
             applyMetadata(document, request);
 
             Document saved = documentRepository.saveAndFlush(document);
+            auditLogService.log(
+                    user,
+                    saved,
+                    AuditAction.UPLOAD );
             return toResponse(saved);
 
         } catch (IOException exception) {
@@ -261,10 +269,15 @@ public class DocumentService {
 
         document.setDeletedAt(LocalDateTime.now());
         documentRepository.saveAndFlush(document);
+        auditLogService.log(
+                user,
+                document,
+                AuditAction.DELETE
+        );
     }
 
-    // 8. Xem nội dung file.
-    @Transactional(readOnly = true)
+    // 8. Xem nội dung file và ghi nhật ký.
+    @Transactional
     public ResponseEntity<byte[]> content(
             Long folderId,
             Long documentId,
@@ -273,11 +286,20 @@ public class DocumentService {
         User user = currentUser(username);
         Document document = ownedDocument(folderId, documentId, user);
 
-        return fileResponse(document, false);
+        ResponseEntity<byte[]> response = fileResponse(document, false);
+
+        auditLogService.log(
+                user,
+                document,
+                AuditAction.VIEW
+        );
+
+        return response;
     }
 
     // 9. Tải xuống file.
-    @Transactional(readOnly = true)
+    // Tải xuống file và ghi nhật ký DOWNLOAD.
+    @Transactional
     public ResponseEntity<byte[]> download(
             Long folderId,
             Long documentId,
@@ -286,7 +308,32 @@ public class DocumentService {
         User user = currentUser(username);
         Document document = ownedDocument(folderId, documentId, user);
 
-        return fileResponse(document, true);
+        ResponseEntity<byte[]> response = fileResponse(document, true);
+
+        auditLogService.log(
+                user,
+                document,
+                AuditAction.DOWNLOAD
+        );
+
+        return response;
+    }
+
+    // Ghi nhận người dùng yêu cầu in tài liệu.
+    @Transactional
+    public void logPrint(
+            Long folderId,
+            Long documentId,
+            String username
+    ) {
+        User user = currentUser(username);
+        Document document = ownedDocument(folderId, documentId, user);
+
+        auditLogService.log(
+                user,
+                document,
+                AuditAction.PRINT
+        );
     }
 
     // 10. Xóa vĩnh viễn bản ghi và file trên ổ đĩa.
@@ -354,6 +401,11 @@ public class DocumentService {
         // File đã mất thì vẫn cho phép dọn bản ghi trong database.
         documentRepository.delete(document);
         documentRepository.flush();
+
+        auditLogService.log(
+                user,
+                document,
+                AuditAction.PERMANENT_DELETE );
     }
 
     // 11. Chạy OCR, lưu trạng thái, kết quả hoặc lỗi.
@@ -419,6 +471,11 @@ public class DocumentService {
         }
 
         ocrStatusService.complete(documentId, text);
+
+        auditLogService.log(
+                user,
+                document,
+                AuditAction.OCR );
 
         return text;
     }
